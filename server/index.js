@@ -747,6 +747,14 @@ function releaseUserSeats(userId) {
   const released = releaseSeatsByUser(userId);
 
   for (const seat of released) {
+    // 人が離席したらCPUも一緒に離席させる
+    const roomBeforeCpuRelease = getRoom(seat.roomId);
+    const cpuColor = getCpuSeatColor(roomBeforeCpuRelease);
+    if (cpuColor) {
+      releaseSeat(seat.roomId, cpuColor, cpuUserId);
+      cpuRooms.delete(seat.roomId);
+    }
+
     const room = getRoom(seat.roomId);
     if (room) {
       let game = getRoomGame(seat.roomId);
@@ -754,9 +762,8 @@ function releaseUserSeats(userId) {
       // プレイ中でなければ準備状態をリセット
       if (seat.statusBefore !== "playing" && game.status !== "playing") {
         game.ready = {
-          black: Boolean(game.ready?.black),
-          white: Boolean(game.ready?.white),
-          [seat.color]: false,
+          black: false,
+          white: false,
         };
         saveGame(seat.roomId, game);
       }
@@ -900,15 +907,22 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // 人が離席したらCPUも一緒に離席させる
+    const roomBeforeCpuRelease = getRoom(roomId);
+    const cpuColor = getCpuSeatColor(roomBeforeCpuRelease);
+    if (cpuColor) {
+      releaseSeat(roomId, cpuColor, cpuUserId);
+      cpuRooms.delete(roomId);
+    }
+
     const room = getRoom(roomId);
     let game = getRoomGame(roomId);
 
     // 離席時は準備状態をリセット
     if (result.statusBefore !== "playing" && game.status !== "playing") {
       game.ready = {
-        black: Boolean(game.ready?.black),
-        white: Boolean(game.ready?.white),
-        [color]: false,
+        black: false,
+        white: false,
       };
       saveGame(roomId, game);
     }
