@@ -52,9 +52,9 @@ const {
 /** サーバーのポート番号（デフォルト: 3001） */
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 
-/** ルーム数（環境変数または10） */
-const roomCountEnv = process.env.ROOM_COUNT ? Number(process.env.ROOM_COUNT) : 10;
-const ROOM_COUNT = Number.isFinite(roomCountEnv) ? roomCountEnv : 10;
+/** ルーム数（環境変数または12） */
+const roomCountEnv = process.env.ROOM_COUNT ? Number(process.env.ROOM_COUNT) : 12;
+const ROOM_COUNT = Number.isFinite(roomCountEnv) ? roomCountEnv : 12;
 
 /** セッション暗号化キー（本番環境では必ず変更すること） */
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev_secret_change_me";
