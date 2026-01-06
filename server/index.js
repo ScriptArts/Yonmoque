@@ -68,34 +68,31 @@ const CPU_LOGIN_ID = "cpu";
 /** CPUプレイヤーの表示名 */
 const CPU_NICKNAME = "CPU";
 
-// データベースを初期化
-initDb(ROOM_COUNT);
-
 // =============================================================================
 // CPU対戦の設定
 // =============================================================================
 
+/** CPUユーザーのID（起動時に設定） */
+let cpuUserId = null;
+
+/** CPUユーザー情報（座席割り当て用） */
+let cpuUserInfo = null;
+
 /**
  * CPUユーザーが存在することを保証し、ユーザー情報を返します。
  * 存在しない場合は新規作成します。
- * @returns {Object} CPUユーザーオブジェクト
+ * @returns {Promise<Object>} CPUユーザーオブジェクト
  */
-function ensureCpuUser() {
-  const existing = getUserByLoginId(CPU_LOGIN_ID);
+async function ensureCpuUser() {
+  const existing = await getUserByLoginId(CPU_LOGIN_ID);
   if (existing) {
     return existing;
   }
   // ランダムなパスワードハッシュを生成（ログインには使用しない）
   const hash = bcrypt.hashSync(`cpu_${Date.now()}`, 10);
-  const odUserId = createUser(CPU_LOGIN_ID, hash, CPU_NICKNAME);
-  return getUserById(odUserId);
+  const odUserId = await createUser(CPU_LOGIN_ID, hash, CPU_NICKNAME);
+  return await getUserById(odUserId);
 }
-
-/** CPUユーザー情報 */
-const cpuUser = ensureCpuUser();
-
-/** CPUユーザーのID */
-const cpuUserId = cpuUser.id;
 
 /**
  * CPUの難易度設定
@@ -192,12 +189,12 @@ function requireAuth(req, res, next) {
  * GET /api/me
  * 現在ログイン中のユーザー情報を取得
  */
-app.get("/api/me", (req, res) => {
+app.get("/api/me", async (req, res) => {
   if (!req.session.userId) {
     res.status(401).json({ error: "unauthorized" });
     return;
   }
-  const user = getUserById(req.session.userId);
+  const user = await getUserById(req.session.userId);
   res.json({ user });
 });
 
@@ -206,7 +203,7 @@ app.get("/api/me", (req, res) => {
  * ニックネームを更新
  * @body {string} nickname - 新しいニックネーム（20文字以内）
  */
-app.post("/api/me/nickname", requireAuth, (req, res) => {
+app.post("/api/me/nickname", requireAuth, async (req, res) => {
   const nicknameRaw = req.body ? req.body.nickname : "";
   const nickname =
     typeof nicknameRaw === "string" ? nicknameRaw.trim() : "";
@@ -217,7 +214,7 @@ app.post("/api/me/nickname", requireAuth, (req, res) => {
   }
 
   const nextNickname = nickname.length === 0 ? null : nickname;
-  const user = updateUserNickname(req.session.userId, nextNickname);
+  const user = await updateUserNickname(req.session.userId, nextNickname);
   res.json({ user });
 });
 
@@ -259,7 +256,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   // 重複チェック
-  if (getUserByLoginId(loginId)) {
+  if (await getUserByLoginId(loginId)) {
     res.status(409).json({ error: "id_exists" });
     return;
   }
@@ -267,7 +264,7 @@ app.post("/api/auth/register", async (req, res) => {
   // ユーザー作成
   const passwordHash = await bcrypt.hash(password, 10);
   const storedNickname = nickname.length === 0 ? null : nickname;
-  const userId = createUser(loginId, passwordHash, storedNickname);
+  const userId = await createUser(loginId, passwordHash, storedNickname);
 
   // セッションにユーザーIDを保存
   req.session.userId = userId;
@@ -294,7 +291,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   // ユーザー検索
-  const user = getUserByLoginId(loginId);
+  const user = await getUserByLoginId(loginId);
   if (!user) {
     res.status(401).json({ error: "invalid_credentials" });
     return;
@@ -434,11 +431,12 @@ function removePresence(roomId, socketId) {
  * 全クライアントにルーム一覧の更新を通知
  */
 function broadcastRooms() {
-  const rooms = listRooms().map((room) => ({
+  const rooms = listRooms();
+  const withPresence = rooms.map((room) => ({
     ...room,
     presence: getRoomPresence(room.id),
   }));
-  io.emit("rooms:update", rooms);
+  io.emit("rooms:update", withPresence);
 }
 
 // =============================================================================
@@ -627,48 +625,53 @@ function maybeRunCpuTurn(roomId) {
   const delay = Number.isFinite(config.delayMs) ? config.delayMs : 350;
 
   setTimeout(() => {
-    const room = getRoom(roomId);
-    const current = getRoomGame(roomId);
+    try {
+      const room = getRoom(roomId);
+      const current = getRoomGame(roomId);
 
-    if (!room) {
+      if (!room) {
+        cpuThinking.delete(roomId);
+        return;
+      }
+
+      // 状態が変わっていたら中断
+      if (current.status !== "playing" || current.turn !== config.color) {
+        cpuThinking.delete(roomId);
+        return;
+      }
+
+      // 最善手を探索
+      const action = searchBestMove(current, config.color, config);
+      if (!action) {
+        cpuThinking.delete(roomId);
+        return;
+      }
+
+      // 手を適用
+      const result = applyAction(current, action);
+      if (!result.ok) {
+        cpuThinking.delete(roomId);
+        return;
+      }
+
+      // ゲーム終了時は準備状態をリセット
+      if (result.state.status === "finished") {
+        result.state.ready = { black: false, white: false };
+      }
+
+      // 結果を通知
+      const next = broadcastGame(roomId, result.state);
+      io.to(`room:${roomId}`).emit("room:state", { room, game: next });
+
       cpuThinking.delete(roomId);
-      return;
-    }
 
-    // 状態が変わっていたら中断
-    if (current.status !== "playing" || current.turn !== config.color) {
+      // 連続手番（相手がパスの場合など）に対応
+      if (next.status === "playing") {
+        maybeRunCpuTurn(roomId);
+      }
+    } catch (error) {
+      console.error("CPU turn error:", error);
       cpuThinking.delete(roomId);
-      return;
-    }
-
-    // 最善手を探索
-    const action = searchBestMove(current, config.color, config);
-    if (!action) {
-      cpuThinking.delete(roomId);
-      return;
-    }
-
-    // 手を適用
-    const result = applyAction(current, action);
-    if (!result.ok) {
-      cpuThinking.delete(roomId);
-      return;
-    }
-
-    // ゲーム終了時は準備状態をリセット
-    if (result.state.status === "finished") {
-      result.state.ready = { black: false, white: false };
-    }
-
-    // 結果を通知
-    const next = broadcastGame(roomId, result.state);
-    io.to(`room:${roomId}`).emit("room:state", { room, game: next });
-
-    cpuThinking.delete(roomId);
-
-    // 連続手番（相手がパスの場合など）に対応
-    if (next.status === "playing") {
-      maybeRunCpuTurn(roomId);
     }
   }, delay);
 }
@@ -785,14 +788,20 @@ function releaseUserSeats(userId) {
 // Socket.io イベントハンドラ
 // =============================================================================
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   // セッションからユーザー情報を取得
   const userId = socket.request.session.userId;
-  const user = getUserById(userId);
+  const user = await getUserById(userId);
 
   // ソケットにユーザー情報を保存
   socket.data.user = user;
   socket.data.roomId = null;
+
+  // ユーザー情報オブジェクト（座席割り当て用）
+  const userInfo = {
+    loginId: user.loginId,
+    nickname: user.nickname,
+  };
 
   // -------------------------------------------------------------------------
   // room:join - ルームに入室
@@ -819,7 +828,7 @@ io.on("connection", (socket) => {
     addPresence(roomId, socket.id);
 
     // 期限切れチャットをクリーンアップ
-    const clearedRooms = cleanupExpiredChats(new Date().toISOString());
+    const clearedRooms = cleanupExpiredChats();
     if (clearedRooms.includes(roomId)) {
       io.to(`room:${roomId}`).emit("chat:cleared", { roomId });
     }
@@ -864,7 +873,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const result = assignSeat(roomId, color, userId);
+    const result = assignSeat(roomId, color, userId, userInfo);
     if (!result.ok) {
       if (ack) ack(result);
       return;
@@ -1017,7 +1026,7 @@ io.on("connection", (socket) => {
     }
 
     // CPUを着席させる
-    const assignResult = assignSeat(roomId, color, cpuUserId);
+    const assignResult = assignSeat(roomId, color, cpuUserId, cpuUserInfo);
     if (!assignResult.ok) {
       if (ack) ack({ ok: false, error: "seat_taken" });
       return;
@@ -1215,7 +1224,7 @@ io.on("connection", (socket) => {
     }
 
     // メッセージを保存してブロードキャスト
-    const chatMessage = addChatMessage(roomId, userId, trimmed);
+    const chatMessage = addChatMessage(roomId, userId, trimmed, userInfo);
     io.to(`room:${roomId}`).emit("chat:new", chatMessage);
     if (ack) ack({ ok: true });
   });
@@ -1238,9 +1247,13 @@ io.on("connection", (socket) => {
  * 60秒ごとに期限切れチャットをクリーンアップ
  */
 setInterval(() => {
-  const clearedRooms = cleanupExpiredChats(new Date().toISOString());
-  for (const roomId of clearedRooms) {
-    io.to(`room:${roomId}`).emit("chat:cleared", { roomId });
+  try {
+    const clearedRooms = cleanupExpiredChats();
+    for (const roomId of clearedRooms) {
+      io.to(`room:${roomId}`).emit("chat:cleared", { roomId });
+    }
+  } catch (error) {
+    console.error("Chat cleanup error:", error);
   }
 }, 60 * 1000);
 
@@ -1248,6 +1261,29 @@ setInterval(() => {
 // サーバー起動
 // =============================================================================
 
-server.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+/**
+ * サーバーを起動する非同期関数
+ */
+async function startServer() {
+  try {
+    // データベース（ユーザーテーブル確認）とルームを初期化
+    await initDb(ROOM_COUNT);
+    console.log("Rooms initialized");
+
+    // CPUユーザーを確保
+    const cpuUser = await ensureCpuUser();
+    cpuUserId = cpuUser.id;
+    cpuUserInfo = { loginId: cpuUser.loginId, nickname: cpuUser.nickname };
+    console.log("CPU user ready:", cpuUserId);
+
+    // サーバーを起動
+    server.listen(PORT, () => {
+      console.log(`Server listening on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
