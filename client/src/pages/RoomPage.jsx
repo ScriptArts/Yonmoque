@@ -318,8 +318,8 @@ export default function RoomPage() {
         : null
     : null
   const cpuSeatColor = useMemo(() => {
-    if (room?.seats?.black?.email === 'cpu@yonmoque.local') return 'black'
-    if (room?.seats?.white?.email === 'cpu@yonmoque.local') return 'white'
+    if (room?.seats?.black?.loginId === 'cpu') return 'black'
+    if (room?.seats?.white?.loginId === 'cpu') return 'white'
     return null
   }, [room])
   const opponentColor = useMemo(() => {
@@ -562,7 +562,7 @@ export default function RoomPage() {
                       着席
                     </Button>
                   )
-                ) : room?.seats.black?.email === 'cpu@yonmoque.local' && canReleaseCpu ? (
+                ) : room?.seats.black?.loginId === 'cpu' && canReleaseCpu ? (
                   <Button variant="outline" size="sm" className="w-full" onClick={handleCpuDisable}>
                     CPU解除
                   </Button>
@@ -598,7 +598,7 @@ export default function RoomPage() {
                       着席
                     </Button>
                   )
-                ) : room?.seats.white?.email === 'cpu@yonmoque.local' && canReleaseCpu ? (
+                ) : room?.seats.white?.loginId === 'cpu' && canReleaseCpu ? (
                   <Button variant="outline" size="sm" className="w-full" onClick={handleCpuDisable}>
                     CPU解除
                   </Button>

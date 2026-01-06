@@ -90,7 +90,7 @@
 - 可用性: ルーム状態の整合性が保たれること
 
 ## 9. データ要件（例）
-- User: id, email, password_hash, created_at
+- User: id, login_id, password_hash, nickname, created_at
 - Room: id, name, status
 - Seat: room_id, color, user_id
 - Game: room_id, board_state, turn, started_at, ended_at
