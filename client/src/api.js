@@ -1,7 +1,14 @@
+/**
+ * APIのベースURL
+ * 本番環境では環境変数から取得、開発環境では空文字（相対パス）
+ */
+const API_BASE_URL = import.meta.env.VITE_API_URL || ''
+
 export async function apiRequest(path, options = {}) {
   const headers = options.headers || {}
   const hasBody = options.body !== undefined
-  const res = await fetch(path, {
+  const url = `${API_BASE_URL}${path}`
+  const res = await fetch(url, {
     credentials: 'include',
     ...options,
     headers: {
