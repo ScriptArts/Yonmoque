@@ -5,6 +5,7 @@ import { resetSocket } from './socket'
 import LoginPage from './pages/LoginPage.jsx'
 import LobbyPage from './pages/LobbyPage.jsx'
 import RoomPage from './pages/RoomPage.jsx'
+import { Button } from "@/components/ui/button"
 
 const AuthContext = createContext(null)
 
@@ -18,8 +19,8 @@ function RequireAuth({ children }) {
 
   if (loading) {
     return (
-      <div className="page center">
-        <div className="card">読み込み中...</div>
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="text-muted-foreground">読み込み中...</div>
       </div>
     )
   }
@@ -75,21 +76,26 @@ export default function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-shell">
+      <div className="flex min-h-screen flex-col font-sans">
         {user ? (
-          <header className="topbar">
-            <div className="brand">ヨンモク</div>
-            <div className="topbar-meta">
-              <span className="user-pill">
-                {user.nickname || '名無しプレイヤー'}
-              </span>
-              <button className="secondary" onClick={authValue.logout}>
-                ログアウト
-              </button>
+          <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+            <div className="container flex h-16 items-center justify-between px-4 md:px-8">
+              <div className="flex items-center gap-3">
+                <img className="h-9 w-9 rounded-md border" src="/icon.png" alt="ヨンモク アイコン" />
+                <div className="text-xl font-bold tracking-tight text-secondary">ヨンモク</div>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="hidden md:inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary font-mono">
+                  {user.nickname || '名無しプレイヤー'}
+                </span>
+                <Button variant="outline" size="sm" onClick={authValue.logout}>
+                  ログアウト
+                </Button>
+              </div>
             </div>
           </header>
         ) : null}
-        <main className="content">
+        <main className="flex-1 container mx-auto p-4 md:p-8 max-w-6xl">
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route
