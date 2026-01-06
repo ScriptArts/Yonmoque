@@ -20,9 +20,19 @@ function getPool() {
     if (!connectionString) {
       throw new Error("DATABASE_URL environment variable is required");
     }
+    
+    // URLをパースしてホスト名を取得
+    const url = new URL(connectionString);
+    
     pool = new Pool({
-      connectionString,
+      user: url.username,
+      password: decodeURIComponent(url.password),
+      host: url.hostname,
+      port: parseInt(url.port) || 5432,
+      database: url.pathname.slice(1),
       ssl: { rejectUnauthorized: false },
+      // IPv4を強制（RenderのIPv6問題を回避）
+      family: 4,
     });
   }
   return pool;
