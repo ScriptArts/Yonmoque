@@ -130,11 +130,20 @@ const cpuThinking = new Set();
 
 const app = express();
 
+// プロキシ信頼設定（Render等のリバースプロキシ対応）
+app.set("trust proxy", 1);
+
 // CORS設定（クライアントからのリクエストを許可）
 app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
 
 // JSONボディパーサー
 app.use(express.json());
+
+/**
+ * 本番環境かどうかを判定
+ * NODE_ENVが'production'またはHTTPS環境の場合はtrue
+ */
+const isProduction = process.env.NODE_ENV === "production" || CLIENT_ORIGIN.startsWith("https://");
 
 /**
  * セッションミドルウェア設定
@@ -144,9 +153,12 @@ const sessionMiddleware = session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  proxy: isProduction,  // プロキシ（Render等）の背後にある場合に必要
   cookie: {
     httpOnly: true,      // JavaScriptからアクセス不可
-    sameSite: "lax",     // CSRF対策
+    // 本番環境ではクロスサイトCookieを有効化
+    sameSite: isProduction ? "none" : "lax",
+    secure: isProduction,  // HTTPSの場合のみtrue
     maxAge: 1000 * 60 * 60 * 24 * 7,  // 7日間
   },
 });
