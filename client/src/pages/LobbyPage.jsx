@@ -49,6 +49,18 @@ export default function LobbyPage() {
   /** ニックネーム保存完了通知 */
   const [nicknameNotice, setNicknameNotice] = useState('')
 
+  /** 現在のパスワード入力値 */
+  const [currentPassword, setCurrentPassword] = useState('')
+
+  /** 新しいパスワード入力値 */
+  const [newPassword, setNewPassword] = useState('')
+
+  /** パスワード変更エラー */
+  const [passwordError, setPasswordError] = useState('')
+
+  /** パスワード変更完了通知 */
+  const [passwordNotice, setPasswordNotice] = useState('')
+
   // -------------------------------------------------------------------------
   // ヘルパー関数
   // -------------------------------------------------------------------------
@@ -145,6 +157,36 @@ export default function LobbyPage() {
     }
   }
 
+  /**
+   * パスワード変更処理
+   * @param {Event} event - フォーム送信イベント
+   */
+  const handlePasswordSubmit = async (event) => {
+    event.preventDefault()
+    setPasswordError('')
+    setPasswordNotice('')
+
+    if (newPassword.length < 6) {
+      setPasswordError('新しいパスワードは6文字以上で入力してください。')
+      return
+    }
+
+    try {
+      await apiPost('/api/me/password', { currentPassword, newPassword })
+      setPasswordNotice('パスワードを変更しました。')
+      setCurrentPassword('')
+      setNewPassword('')
+    } catch (err) {
+      if (err?.payload?.error === 'invalid_current_password') {
+        setPasswordError('現在のパスワードが正しくありません。')
+      } else if (err?.payload?.error === 'password_too_short') {
+        setPasswordError('新しいパスワードは6文字以上で入力してください。')
+      } else {
+        setPasswordError('パスワード変更に失敗しました。')
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // レンダリング
   // -------------------------------------------------------------------------
@@ -163,33 +205,70 @@ export default function LobbyPage() {
         </div>
       </div>
 
-      {/* ===== ニックネーム設定カード ===== */}
-      <Card className="border-primary/20 bg-primary/5">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-lg">ニックネーム設定</CardTitle>
-          <CardDescription>未設定の場合は「名無しプレイヤー」になります。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleNicknameSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-start">
-             <div className="grid w-full max-w-sm items-center gap-1.5">
+      {/* ===== ニックネーム・パスワード設定 ===== */}
+      <div className="grid gap-6 md:grid-cols-2">
+        {/* ニックネーム設定カード */}
+        <Card className="border-primary/20 bg-primary/5">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg">ニックネーム設定</CardTitle>
+            <CardDescription>未設定の場合は「名無しプレイヤー」になります。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleNicknameSubmit} className="flex flex-col gap-4">
+               <div className="grid w-full items-center gap-1.5">
+                 <div className="flex gap-2">
+                   <Input
+                     type="text"
+                     className="bg-background"
+                     value={nickname}
+                     maxLength={20}
+                     onChange={(e) => setNickname(e.target.value)}
+                     placeholder="ニックネームを入力"
+                   />
+                   <Button type="submit">保存</Button>
+                 </div>
+                 {/* エラー/成功メッセージ */}
+                 {nicknameError && <p className="text-sm font-medium text-destructive">{nicknameError}</p>}
+                 {nicknameNotice && <p className="text-sm font-medium text-primary">{nicknameNotice}</p>}
+               </div>
+            </form>
+          </CardContent>
+        </Card>
+
+        {/* パスワード変更カード */}
+        <Card className="border-secondary/20 bg-secondary/5">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg">パスワード変更</CardTitle>
+            <CardDescription>パスワードは6文字以上で入力してください。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handlePasswordSubmit} className="flex flex-col gap-3">
+               <Input
+                 type="password"
+                 className="bg-background"
+                 value={currentPassword}
+                 onChange={(e) => setCurrentPassword(e.target.value)}
+                 placeholder="現在のパスワード"
+                 autoComplete="current-password"
+               />
                <div className="flex gap-2">
                  <Input
-                   type="text"
+                   type="password"
                    className="bg-background"
-                   value={nickname}
-                   maxLength={20}
-                   onChange={(e) => setNickname(e.target.value)}
-                   placeholder="ニックネームを入力"
+                   value={newPassword}
+                   onChange={(e) => setNewPassword(e.target.value)}
+                   placeholder="新しいパスワード"
+                   autoComplete="new-password"
                  />
-                 <Button type="submit">保存</Button>
+                 <Button type="submit" variant="secondary">変更</Button>
                </div>
                {/* エラー/成功メッセージ */}
-               {nicknameError && <p className="text-sm font-medium text-destructive">{nicknameError}</p>}
-               {nicknameNotice && <p className="text-sm font-medium text-primary">{nicknameNotice}</p>}
-             </div>
-          </form>
-        </CardContent>
-      </Card>
+               {passwordError && <p className="text-sm font-medium text-destructive">{passwordError}</p>}
+               {passwordNotice && <p className="text-sm font-medium text-primary">{passwordNotice}</p>}
+            </form>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* ===== ローディング/エラー表示 ===== */}
       {loading && <div className="text-muted-foreground text-center py-10">ルーム読み込み中...</div>}

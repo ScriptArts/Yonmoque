@@ -27,7 +27,9 @@ const {
   createUser,
   getUserByLoginId,
   getUserById,
+  getUserWithPasswordById,
   updateUserNickname,
+  updateUserPassword,
   assignSeat,
   releaseSeat,
   releaseSeatsByUser,
@@ -216,6 +218,46 @@ app.post("/api/me/nickname", requireAuth, async (req, res) => {
   const nextNickname = nickname.length === 0 ? null : nickname;
   const user = await updateUserNickname(req.session.userId, nextNickname);
   res.json({ user });
+});
+
+/**
+ * POST /api/me/password
+ * パスワードを変更
+ * @body {string} currentPassword - 現在のパスワード
+ * @body {string} newPassword - 新しいパスワード（6文字以上）
+ */
+app.post("/api/me/password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+
+  // バリデーション
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ error: "missing_fields" });
+    return;
+  }
+
+  if (typeof newPassword !== "string" || newPassword.length < 6) {
+    res.status(400).json({ error: "password_too_short" });
+    return;
+  }
+
+  // 現在のパスワードを検証
+  const user = await getUserWithPasswordById(req.session.userId);
+  if (!user) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+
+  const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!isMatch) {
+    res.status(400).json({ error: "invalid_current_password" });
+    return;
+  }
+
+  // 新しいパスワードをハッシュ化して保存
+  const newHash = await bcrypt.hash(newPassword, 10);
+  await updateUserPassword(req.session.userId, newHash);
+
+  res.json({ success: true });
 });
 
 /**

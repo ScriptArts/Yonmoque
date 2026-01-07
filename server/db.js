@@ -143,6 +143,34 @@ async function updateUserNickname(userId, nickname) {
   return getUserById(userId);
 }
 
+/**
+ * ユーザーのパスワードを更新します。
+ * @param {number} userId - 更新するユーザーのID
+ * @param {string} passwordHash - 新しいパスワードのハッシュ
+ * @returns {Promise<boolean>} 更新成功時はtrue
+ */
+async function updateUserPassword(userId, passwordHash) {
+  const result = await getPool().query(
+    `UPDATE users SET password_hash = $1 WHERE id = $2`,
+    [passwordHash, userId]
+  );
+  return result.rowCount > 0;
+}
+
+/**
+ * ユーザーIDからパスワードハッシュを含むユーザー情報を取得します。
+ * @param {number} id - 検索するユーザーID
+ * @returns {Promise<Object|null>} ユーザーオブジェクト（パスワードハッシュ含む）
+ */
+async function getUserWithPasswordById(id) {
+  const result = await getPool().query(
+    `SELECT id, login_id AS "loginId", password_hash, nickname, created_at
+     FROM users WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
 // =============================================================================
 // ルーム操作（インメモリ）
 // =============================================================================
@@ -396,7 +424,9 @@ module.exports = {
   createUser,
   getUserByLoginId,
   getUserById,
+  getUserWithPasswordById,
   updateUserNickname,
+  updateUserPassword,
   listRooms,
   getRoom,
   getRoomStatus,
