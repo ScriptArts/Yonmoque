@@ -136,7 +136,7 @@ export default function SettingsPage() {
         <div className="border-b border-primary/60 bg-card px-4 py-3">
           <h3 className="text-sm font-bold tracking-tight">ニックネーム</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            対局中や観戦者一覧に表示される名前です。未設定の場合は「名無しプレイヤー」になります。
+            対局の席やチャットに表示される名前です。未設定の場合は「名無しプレイヤー」になります。
           </p>
         </div>
         <form onSubmit={handleNicknameSubmit} className="space-y-3 p-4">

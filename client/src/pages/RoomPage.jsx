@@ -456,7 +456,7 @@ export default function RoomPage() {
       <div className="flex shrink-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-baseline gap-3">
           <h2 className="truncate text-lg font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
-          <p className="shrink-0 text-xs text-muted-foreground">観戦: {presence}人</p>
+          <p className="shrink-0 text-xs text-muted-foreground">入室: {presence}人</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {/*

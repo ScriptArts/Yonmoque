@@ -580,10 +580,26 @@ export class RoomDurableObject extends DurableObject {
 
   /**
    * 観戦者を含む現在の接続数を返します。
+   *
+   * 切断処理(webSocketClose)の最中は、閉じたソケットもまだ
+   * getWebSockets() に含まれている。そのため切断時は自分自身を
+   * exclude に渡して数えないようにする。
+   *
+   * @param {WebSocket} [exclude=null] - 数えないソケット
    * @returns {number} 接続数
    */
-  presence() {
-    return this.ctx.getWebSockets().length;
+  presence(exclude = null) {
+    const sockets = this.ctx.getWebSockets();
+    if (!exclude) {
+      return sockets.length;
+    }
+    let count = 0;
+    for (const ws of sockets) {
+      if (ws !== exclude) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   /**
@@ -648,7 +664,7 @@ export class RoomDurableObject extends DurableObject {
    * ロビーへルームの最新サマリを通知します。
    * @returns {Promise<void>}
    */
-  async notifyLobby() {
+  async notifyLobby(exclude = null) {
     if (this.state.roomId === null) {
       return;
     }
@@ -665,7 +681,7 @@ export class RoomDurableObject extends DurableObject {
           name: this.state.name,
           status: this.state.status,
           seats: this.state.seats,
-          presence: this.presence(),
+          presence: this.presence(exclude),
         }),
       });
     } catch {
@@ -1078,13 +1094,14 @@ export class RoomDurableObject extends DurableObject {
       this.releaseUserSeats(user.userId);
     }
 
+    // 閉じたソケットは自分自身を除いて数える
     this.broadcast("room:presence", {
       roomId: this.state.roomId,
-      count: Math.max(0, this.presence() - 1),
+      count: this.presence(ws),
     });
 
     await this.save();
-    await this.notifyLobby();
+    await this.notifyLobby(ws);
   }
 
   /**
