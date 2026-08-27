@@ -165,6 +165,31 @@ npm run deploy
 2. `npx wrangler d1 execute yonmoque --remote --file schema.sql` でテーブル作成
 3. `npx wrangler secret put SESSION_SECRET` で署名鍵を登録
 
+### 自動デプロイ（Workers Builds）
+
+`main` への push で自動デプロイするには、Cloudflare ダッシュボードで
+Git 連携を設定します（**Workers & Pages > yonmoque > Settings > Builds > Connect**）。
+
+| 設定項目 | 値 |
+|---------|-----|
+| Root directory | `worker` |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Production branch | `main` |
+
+`worker/package.json` の `build` スクリプトがクライアントの lint とビルドを行い、
+`wrangler.jsonc` の `assets.directory`（`../client/dist`）がその成果物を配信します。
+lint かビルドが失敗した場合はデプロイされません。
+
+GitHub App のインストールには、対象 organization の owner または
+GitHub Apps Manager 権限が必要です。
+
+**注意点**
+
+- ダッシュボードの Worker 名と `wrangler.jsonc` の `name` が一致していないとビルドが失敗します（どちらも `yonmoque`）
+- Durable Object を使う Worker のため、本番以外のブランチではプレビューURLが生成されません
+- **D1 のスキーマ変更は自動適用されません。** テーブル定義を変えたときは `npm run db:remote` を手動で実行してください
+
 ### 注意事項
 
 1. **永続化の範囲**
