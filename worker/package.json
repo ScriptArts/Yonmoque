@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "build": "npm --prefix ../client ci && npm --prefix ../client run lint && npm --prefix ../client run build",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute yonmoque --local --file schema.sql",
     "db:remote": "wrangler d1 execute yonmoque --remote --file schema.sql"
