@@ -6,7 +6,9 @@ import { AuthContext, useAuth } from './auth'
 import LoginPage from './pages/LoginPage.jsx'
 import LobbyPage from './pages/LobbyPage.jsx'
 import RoomPage from './pages/RoomPage.jsx'
+import SettingsPage from './pages/SettingsPage.jsx'
 import { Button } from "@/components/ui/button"
+import { Link } from 'react-router-dom'
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth()
@@ -73,16 +75,23 @@ export default function App() {
     <AuthContext.Provider value={authValue}>
       <div className="flex h-dvh flex-col overflow-hidden font-sans">
         {user ? (
-          <header className="w-full shrink-0 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-            <div className="container flex h-14 items-center justify-between px-4 md:px-8">
-              <div className="flex items-center gap-3">
-                <img className="h-9 w-9 rounded-md border" src="/icon.png" alt="ヨンモク アイコン" />
-                <div className="text-xl font-bold tracking-tight text-secondary">ヨンモク</div>
+          <header className="w-full shrink-0 border-b bg-card">
+            <div className="container mx-auto flex h-14 max-w-6xl items-center justify-between px-4 md:px-8">
+              <div className="flex items-center gap-2.5">
+                <img className="h-7 w-7 rounded-sm border" src="/icon.png" alt="ヨンモク アイコン" />
+                <span className="text-base font-bold tracking-tight text-secondary">ヨンモク</span>
               </div>
               <div className="flex items-center gap-4">
-                <span className="hidden md:inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold text-primary font-mono">
+                {/* 名前をそのままアカウント設定への入口にする */}
+                <Link
+                  to="/settings"
+                  className="hidden font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground md:inline"
+                >
                   {user.nickname || '名無しプレイヤー'}
-                </span>
+                </Link>
+                <Button variant="outline" size="sm" asChild>
+                  <Link to="/settings">設定</Link>
+                </Button>
                 <Button variant="outline" size="sm" onClick={authValue.logout}>
                   ログアウト
                 </Button>
@@ -106,6 +115,14 @@ export default function App() {
               element={
                 <RequireAuth>
                   <RoomPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RequireAuth>
+                  <SettingsPage />
                 </RequireAuth>
               }
             />
