@@ -1,6 +1,5 @@
 node_modules/
 client/dist/
-server/data/*.db
-server/data/*.db-*
+.wrangler/
 .env
 .DS_Store

@@ -1,17 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { apiGet, apiPost } from './api'
 import { resetSocket } from './socket'
+import { AuthContext, useAuth } from './auth'
 import LoginPage from './pages/LoginPage.jsx'
 import LobbyPage from './pages/LobbyPage.jsx'
 import RoomPage from './pages/RoomPage.jsx'
 import { Button } from "@/components/ui/button"
-
-const AuthContext = createContext(null)
-
-export function useAuth() {
-  return useContext(AuthContext)
-}
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth()
@@ -19,7 +14,7 @@ function RequireAuth({ children }) {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
+      <div className="flex h-full items-center justify-center">
         <div className="text-muted-foreground">読み込み中...</div>
       </div>
     )
@@ -76,10 +71,10 @@ export default function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="flex min-h-screen flex-col font-sans">
+      <div className="flex h-dvh flex-col overflow-hidden font-sans">
         {user ? (
-          <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-            <div className="container flex h-16 items-center justify-between px-4 md:px-8">
+          <header className="w-full shrink-0 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+            <div className="container flex h-14 items-center justify-between px-4 md:px-8">
               <div className="flex items-center gap-3">
                 <img className="h-9 w-9 rounded-md border" src="/icon.png" alt="ヨンモク アイコン" />
                 <div className="text-xl font-bold tracking-tight text-secondary">ヨンモク</div>
@@ -95,7 +90,7 @@ export default function App() {
             </div>
           </header>
         ) : null}
-        <main className="flex-1 container mx-auto p-4 md:p-8 max-w-6xl">
+        <main className="container mx-auto min-h-0 w-full max-w-6xl flex-1 overflow-auto p-4 md:px-8 md:py-5">
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route

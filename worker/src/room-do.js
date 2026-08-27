@@ -1,0 +1,1053 @@
+/**
+ * @fileoverview ルーム用 Durable Object
+ *
+ * 1ルーム＝1インスタンス。座席・対局状態・チャット・観戦者・CPU思考と、
+ * そのルームに繋がっている全WebSocketを保持する。
+ *
+ * Node版（server/index.js）ではこれらをプロセスのメモリ上のMapで持っていたが、
+ * Workers はステートレスなため Durable Object に置き換えている。
+ * イベント名とペイロードは Socket.io 版と同一なので、画面側の変更は最小で済む。
+ *
+ * @module room-do
+ */
+
+import { DurableObject } from "cloudflare:workers";
+
+import {
+  createNewGameState,
+  createWaitingState,
+  normalizeState,
+  applyAction,
+} from "./game.js";
+import { searchBestMove, resolveCpuLevel } from "./ai.js";
+import { encodeEvent, encodeResponse, decodeMessage, PING, PONG } from "./protocol.js";
+
+/** CPUプレイヤーを表す擬似ユーザーID（D1には作らない） */
+const CPU_USER_ID = -1;
+
+/** CPUプレイヤーのログインID（画面側がCPU席の判定に使う） */
+const CPU_LOGIN_ID = "cpu";
+
+/** CPUプレイヤーの表示名 */
+const CPU_NICKNAME = "CPU";
+
+/** CPUが着手するまでの遅延（人間らしく見せるため） */
+const CPU_DELAY_MS = 350;
+
+/** チャット履歴の保持時間（最終発言から30分） */
+const CHAT_TTL_MS = 30 * 60 * 1000;
+
+/** チャット1件あたりの最大文字数 */
+const CHAT_MAX_LENGTH = 300;
+
+export class RoomDurableObject extends DurableObject {
+  /**
+   * @param {DurableObjectState} ctx - Durable Object の状態
+   * @param {Object} env - 環境変数とバインディング
+   */
+  constructor(ctx, env) {
+    super(ctx, env);
+
+    /** @type {Object} ルームの永続状態 */
+    this.state = null;
+
+    // 起動時（ハイバネーションからの復帰を含む）に状態を復元する。
+    // blockConcurrencyWhile の間はイベントが配送されないため、
+    // ハンドラが未初期化の状態を触ることはない。
+    ctx.blockConcurrencyWhile(async () => {
+      const stored = await ctx.storage.get("state");
+      this.state = stored || this.createInitialState();
+    });
+
+    // ping/pong は Durable Object を起こさずに自動応答させる
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+  }
+
+  /**
+   * 初期状態を作ります。
+   * @returns {Object} ルームの初期状態
+   */
+  createInitialState() {
+    return {
+      roomId: null,
+      name: "",
+      status: "waiting",
+      seats: { black: null, white: null },
+      game: createWaitingState(),
+      chat: [],
+      chatIdCounter: 1,
+      chatExpiresAt: null,
+      cpu: null,
+      cpuMoveAt: null,
+    };
+  }
+
+  /**
+   * 現在の状態を永続化します。
+   * @returns {Promise<void>}
+   */
+  save() {
+    return this.ctx.storage.put("state", this.state);
+  }
+
+  // ===========================================================================
+  // ルーム / 座席（Node版 server/db.js 相当）
+  // ===========================================================================
+
+  /**
+   * 画面に返すルームオブジェクトを組み立てます。
+   * @returns {Object} ルーム情報
+   */
+  getRoom() {
+    return {
+      id: this.state.roomId,
+      name: this.state.name,
+      status: this.state.status,
+      seats: this.state.seats,
+    };
+  }
+
+  /**
+   * 座席の埋まり具合からルームのステータスを更新します。
+   * @returns {string} 更新後のステータス
+   */
+  updateRoomStatus() {
+    const { black, white } = this.state.seats;
+    this.state.status = black && white ? "playing" : "waiting";
+    return this.state.status;
+  }
+
+  /**
+   * ユーザーを座席に着席させます。
+   * @param {'black'|'white'} color - 座席の色
+   * @param {number} userId - ユーザーID
+   * @param {Object} userInfo - ユーザー情報（loginId, nickname）
+   * @returns {Object} 結果オブジェクト
+   */
+  assignSeat(color, userId, userInfo) {
+    const seats = this.state.seats;
+
+    if (color !== "black" && color !== "white") {
+      return { ok: false, reason: "invalid_seat" };
+    }
+
+    // 他のユーザーが座っている場合は拒否
+    if (seats[color] && seats[color].userId !== userId) {
+      return { ok: false, reason: "taken" };
+    }
+
+    // 同じユーザーが反対側の席に座っている場合は拒否
+    const otherColor = color === "black" ? "white" : "black";
+    if (seats[otherColor] && seats[otherColor].userId === userId) {
+      return { ok: false, reason: "already_seated" };
+    }
+
+    seats[color] = {
+      userId,
+      loginId: userInfo.loginId,
+      nickname: userInfo.nickname,
+    };
+
+    return { ok: true, status: this.updateRoomStatus() };
+  }
+
+  /**
+   * ユーザーを座席から離席させます。
+   * @param {'black'|'white'} color - 座席の色
+   * @param {number} userId - ユーザーID
+   * @returns {Object} 結果オブジェクト
+   */
+  releaseSeat(color, userId) {
+    const seats = this.state.seats;
+
+    if (color !== "black" && color !== "white") {
+      return { ok: false, reason: "invalid_seat" };
+    }
+    if (!seats[color] || seats[color].userId !== userId) {
+      return { ok: false, reason: "not_owner" };
+    }
+
+    const statusBefore = this.state.status;
+    seats[color] = null;
+    const statusAfter = this.updateRoomStatus();
+
+    return { ok: true, statusBefore, statusAfter };
+  }
+
+  /**
+   * 指定ユーザーが座っている座席をすべて解放します。
+   * @param {number} userId - ユーザーID
+   * @returns {Array<Object>} 解放した座席情報
+   */
+  releaseSeatsByUser(userId) {
+    const released = [];
+
+    for (const color of ["black", "white"]) {
+      const seat = this.state.seats[color];
+      if (seat && seat.userId === userId) {
+        const statusBefore = this.state.status;
+        this.state.seats[color] = null;
+        const statusAfter = this.updateRoomStatus();
+        released.push({ color, statusBefore, statusAfter });
+      }
+    }
+
+    return released;
+  }
+
+  // ===========================================================================
+  // 対局状態（Node版 server/index.js 相当）
+  // ===========================================================================
+
+  /**
+   * CPUが着席していれば、その席を常に準備完了として扱います。
+   * @param {Object} game - ゲーム状態
+   * @returns {Object} 更新後のゲーム状態
+   */
+  applyCpuReady(game) {
+    const cpu = this.state.cpu;
+    if (!cpu) {
+      return game;
+    }
+    if (game.status === "playing") {
+      return game;
+    }
+
+    game.ready = {
+      black: Boolean(game.ready?.black),
+      white: Boolean(game.ready?.white),
+      [cpu.color]: true,
+    };
+    return game;
+  }
+
+  /**
+   * 現在のゲーム状態を取得します（CPUの準備完了を反映済み）。
+   * @returns {Object} ゲーム状態
+   */
+  getRoomGame() {
+    const game = this.state.game ? normalizeState(this.state.game) : createWaitingState();
+    return this.applyCpuReady(game);
+  }
+
+  /**
+   * ゲーム状態を保存し、ルーム内の全員に配信します。
+   * @param {Object} game - ゲーム状態
+   * @returns {Object} 保存されたゲーム状態
+   */
+  broadcastGame(game) {
+    const next = this.applyCpuReady(game);
+    this.state.game = next;
+    this.broadcast("game:state", { roomId: this.state.roomId, game: next });
+    return next;
+  }
+
+  /**
+   * 両者が準備完了していれば対局を開始します。
+   * @returns {Object|null} 開始したゲーム状態、変化なしならnull
+   */
+  startGameIfReady() {
+    if (this.state.status !== "playing") {
+      return null;
+    }
+
+    const game = this.getRoomGame();
+
+    // 既に対局中
+    if (game.status === "playing") {
+      return game;
+    }
+
+    const ready = game.ready || { black: false, white: false };
+    if (ready.black && ready.white) {
+      return this.broadcastGame(createNewGameState());
+    }
+
+    return game;
+  }
+
+  /**
+   * ユーザーが座っている席の色を返します。
+   * @param {number} userId - ユーザーID
+   * @returns {'black'|'white'|null} 席の色
+   */
+  getPlayerColor(userId) {
+    const seats = this.state.seats;
+    if (seats.black && seats.black.userId === userId) {
+      return "black";
+    }
+    if (seats.white && seats.white.userId === userId) {
+      return "white";
+    }
+    return null;
+  }
+
+  /**
+   * CPUが座っている席の色を返します。
+   * @returns {'black'|'white'|null} 席の色
+   */
+  getCpuSeatColor() {
+    const seats = this.state.seats;
+    if (seats.black?.userId === CPU_USER_ID) {
+      return "black";
+    }
+    if (seats.white?.userId === CPU_USER_ID) {
+      return "white";
+    }
+    return null;
+  }
+
+  /**
+   * プレイヤーの準備完了状態を設定します。
+   * @param {'black'|'white'} color - プレイヤーの色
+   * @param {boolean} value - 準備完了かどうか
+   * @returns {Object} 結果オブジェクト
+   */
+  setReady(color, value) {
+    const game = this.getRoomGame();
+
+    if (game.status === "playing") {
+      return { ok: false, error: "game_in_progress" };
+    }
+
+    game.ready = {
+      black: Boolean(game.ready?.black),
+      white: Boolean(game.ready?.white),
+      [color]: Boolean(value),
+    };
+
+    if (this.state.status === "playing" && game.ready.black && game.ready.white) {
+      const next = this.broadcastGame(createNewGameState());
+      return { ok: true, game: next, started: true };
+    }
+
+    return { ok: true, game: this.broadcastGame(game) };
+  }
+
+  /**
+   * 対局中の離脱（不戦敗）を処理します。
+   *
+   * Node版で見つかった不具合の修正をそのまま持ち込んでいる:
+   * CPU戦から人間が退出すると両席が空になり勝者が決まらないため、
+   * 対局を待機状態へ戻さないとルームが二度と使えなくなる。
+   * Durable Object では状態が永続化されるので、この修正が無いと復旧不能になる。
+   *
+   * @param {number} leaverUserId - 離脱したユーザーのID
+   */
+  handleForfeit(leaverUserId) {
+    // 残っている「人間の」プレイヤーを勝者とする
+    // （離席した本人と、道連れで離席済みのCPUは勝者になれない）
+    let winnerColor = null;
+    for (const color of ["black", "white"]) {
+      const seat = this.state.seats[color];
+      if (seat && seat.userId !== leaverUserId && seat.userId !== CPU_USER_ID) {
+        winnerColor = color;
+      }
+    }
+
+    const game = this.getRoomGame();
+    if (game.status === "playing") {
+      if (winnerColor) {
+        game.status = "finished";
+        game.winner = winnerColor;
+        game.result = "forfeit";
+        game.ready = { black: false, white: false };
+        this.broadcastGame(game);
+      } else {
+        // 対戦相手が残っていないので対局を破棄して待機状態へ戻す
+        this.broadcastGame(createWaitingState());
+      }
+    }
+
+    this.broadcast("room:forfeit", {
+      roomId: this.state.roomId,
+      winnerColor,
+      leaverUserId,
+    });
+  }
+
+  /**
+   * ユーザーの座席を解放し、必要なら不戦敗処理を行います。
+   * @param {number} userId - ユーザーID
+   * @returns {boolean} 何か解放したらtrue
+   */
+  releaseUserSeats(userId) {
+    const released = this.releaseSeatsByUser(userId);
+    if (released.length === 0) {
+      return false;
+    }
+
+    // 人が離席したらCPUも一緒に離席させる
+    const cpuColor = this.getCpuSeatColor();
+    if (cpuColor) {
+      this.releaseSeat(cpuColor, CPU_USER_ID);
+      this.state.cpu = null;
+      this.state.cpuMoveAt = null;
+    }
+
+    const wasPlaying = released.some((seat) => seat.statusBefore === "playing");
+
+    let game = this.getRoomGame();
+    if (!wasPlaying && game.status !== "playing") {
+      game.ready = { black: false, white: false };
+      this.state.game = game;
+    }
+
+    if (wasPlaying) {
+      this.handleForfeit(userId);
+    }
+
+    game = this.getRoomGame();
+    this.broadcast("room:state", { room: this.getRoom(), game });
+    return true;
+  }
+
+  // ===========================================================================
+  // CPU思考
+  // ===========================================================================
+
+  /**
+   * CPUの手番なら、少し遅らせて着手するようアラームを仕掛けます。
+   */
+  scheduleCpuTurn() {
+    const cpu = this.state.cpu;
+    if (!cpu) {
+      this.state.cpuMoveAt = null;
+      return;
+    }
+
+    const game = this.getRoomGame();
+    if (game.status !== "playing" || game.turn !== cpu.color) {
+      this.state.cpuMoveAt = null;
+      return;
+    }
+
+    this.state.cpuMoveAt = Date.now() + CPU_DELAY_MS;
+  }
+
+  /**
+   * CPUの手を1手だけ指します。
+   *
+   * 1回のアラームで1手だけ処理し、まだCPUの手番なら次のアラームを仕掛ける。
+   * こうすることで1リクエストあたりのCPU時間を短く保てる
+   * （無料プランは10ms/リクエスト）。
+   */
+  runCpuTurn() {
+    const cpu = this.state.cpu;
+    if (!cpu) {
+      return;
+    }
+
+    const game = this.getRoomGame();
+    if (game.status !== "playing" || game.turn !== cpu.color) {
+      this.state.cpuMoveAt = null;
+      return;
+    }
+
+    const action = searchBestMove(game, cpu.color, cpu);
+    if (!action) {
+      this.state.cpuMoveAt = null;
+      return;
+    }
+
+    const result = applyAction(game, action);
+    if (!result.ok) {
+      this.state.cpuMoveAt = null;
+      return;
+    }
+
+    if (result.state.status === "finished") {
+      result.state.ready = { black: false, white: false };
+    }
+
+    const next = this.broadcastGame(result.state);
+    this.broadcast("room:state", { room: this.getRoom(), game: next });
+
+    // 相手がパスして再びCPUの手番になっている場合に備えて仕掛け直す
+    this.scheduleCpuTurn();
+  }
+
+  // ===========================================================================
+  // チャット
+  // ===========================================================================
+
+  /**
+   * チャットメッセージを追加します。
+   * @param {number} userId - 発言者のユーザーID
+   * @param {string} message - 本文
+   * @param {Object} userInfo - ユーザー情報
+   * @returns {Object} 追加されたメッセージ
+   */
+  addChatMessage(userId, message, userInfo) {
+    const now = new Date();
+    const entry = {
+      id: this.state.chatIdCounter++,
+      room_id: this.state.roomId,
+      user_id: userId,
+      message,
+      created_at: now.toISOString(),
+      loginId: userInfo.loginId,
+      nickname: userInfo.nickname,
+    };
+
+    this.state.chat.push(entry);
+    this.state.chatExpiresAt = now.getTime() + CHAT_TTL_MS;
+    return entry;
+  }
+
+  /**
+   * 期限切れのチャットを削除します。
+   * @returns {boolean} 削除したらtrue
+   */
+  cleanupExpiredChat() {
+    const expiresAt = this.state.chatExpiresAt;
+    if (!expiresAt || expiresAt > Date.now()) {
+      return false;
+    }
+
+    this.state.chat = [];
+    this.state.chatExpiresAt = null;
+    this.broadcast("chat:cleared", { roomId: this.state.roomId });
+    return true;
+  }
+
+  // ===========================================================================
+  // 配信 / アラーム
+  // ===========================================================================
+
+  /**
+   * 接続中の全クライアントへイベントを配信します。
+   * @param {string} event - イベント名
+   * @param {*} payload - ペイロード
+   */
+  broadcast(event, payload) {
+    const message = encodeEvent(event, payload);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(message);
+      } catch {
+        // 送信できないソケットは close 側で処理される
+      }
+    }
+  }
+
+  /**
+   * 観戦者を含む現在の接続数を返します。
+   * @returns {number} 接続数
+   */
+  presence() {
+    return this.ctx.getWebSockets().length;
+  }
+
+  /**
+   * 同じユーザーの別接続が残っているか調べます（複数タブ対策）。
+   * @param {number} userId - ユーザーID
+   * @param {WebSocket} exclude - 判定から除外するソケット
+   * @returns {boolean} 他に接続があればtrue
+   */
+  hasOtherSocket(userId, exclude) {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === exclude) {
+        continue;
+      }
+      const attachment = ws.deserializeAttachment();
+      if (attachment && attachment.userId === userId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * CPU着手とチャット期限のうち、早い方にアラームを合わせます。
+   * @returns {Promise<void>}
+   */
+  async scheduleAlarm() {
+    const candidates = [this.state.cpuMoveAt, this.state.chatExpiresAt].filter(
+      (value) => typeof value === "number" && value > 0
+    );
+
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const next = Math.min(...candidates);
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > next) {
+      await this.ctx.storage.setAlarm(next);
+    }
+  }
+
+  /**
+   * アラームハンドラ。CPU着手とチャット期限切れの両方を処理します。
+   * @returns {Promise<void>}
+   */
+  async alarm() {
+    const now = Date.now();
+
+    if (this.state.cpuMoveAt && this.state.cpuMoveAt <= now) {
+      this.state.cpuMoveAt = null;
+      this.runCpuTurn();
+    }
+
+    this.cleanupExpiredChat();
+
+    await this.save();
+    await this.scheduleAlarm();
+    await this.notifyLobby();
+  }
+
+  /**
+   * ロビーへルームの最新サマリを通知します。
+   * @returns {Promise<void>}
+   */
+  async notifyLobby() {
+    if (this.state.roomId === null) {
+      return;
+    }
+
+    const id = this.env.LOBBY.idFromName("lobby");
+    const stub = this.env.LOBBY.get(id);
+
+    try {
+      await stub.fetch("https://lobby/room-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: this.state.roomId,
+          name: this.state.name,
+          status: this.state.status,
+          seats: this.state.seats,
+          presence: this.presence(),
+        }),
+      });
+    } catch {
+      // ロビー通知の失敗は対局を止める理由にはならない
+    }
+  }
+
+  // ===========================================================================
+  // HTTP / WebSocket 入口
+  // ===========================================================================
+
+  /**
+   * Worker からの内部リクエストを処理します。
+   * @param {Request} request - リクエスト
+   * @returns {Promise<Response>} レスポンス
+   */
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    // ルームIDと名前は初回アクセス時に確定させる
+    const roomId = Number(url.searchParams.get("roomId"));
+    if (Number.isFinite(roomId) && roomId > 0 && this.state.roomId !== roomId) {
+      this.state.roomId = roomId;
+      this.state.name = `ルーム ${roomId}`;
+      await this.save();
+    }
+
+    // --- 現在の状態のスナップショット（GET /api/rooms/:id 用） ---
+    if (url.pathname === "/snapshot") {
+      this.cleanupExpiredChat();
+      return Response.json({
+        room: this.getRoom(),
+        chat: this.state.chat,
+        game: this.getRoomGame(),
+      });
+    }
+
+    // --- WebSocket 接続 ---
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+
+    const user = {
+      userId: Number(url.searchParams.get("userId")),
+      loginId: url.searchParams.get("loginId") || "",
+      nickname: url.searchParams.get("nickname") || null,
+    };
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment(user);
+
+    this.broadcast("room:presence", {
+      roomId: this.state.roomId,
+      count: this.presence(),
+    });
+    await this.notifyLobby();
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * クライアントからのメッセージを処理します。
+   * @param {WebSocket} ws - 送信元のソケット
+   * @param {string} raw - 受信データ
+   * @returns {Promise<void>}
+   */
+  async webSocketMessage(ws, raw) {
+    const message = decodeMessage(raw);
+    if (!message || message.t !== "req") {
+      return;
+    }
+
+    const user = ws.deserializeAttachment();
+    if (!user) {
+      return;
+    }
+
+    const respond = (payload) => {
+      if (message.id !== undefined && message.id !== null) {
+        try {
+          ws.send(encodeResponse(message.id, payload));
+        } catch {
+          // 送信失敗は close 側で処理される
+        }
+      }
+    };
+
+    try {
+      await this.handleEvent(ws, user, message.event, message.payload || {}, respond);
+    } catch (error) {
+      console.error("room event error:", message.event, error);
+      respond({ ok: false, error: "internal_error" });
+    }
+
+    await this.save();
+    await this.scheduleAlarm();
+    await this.notifyLobby();
+  }
+
+  /**
+   * イベント名ごとの処理を振り分けます。
+   * イベント名・ペイロード・エラーコードは Socket.io 版と同一。
+   *
+   * @param {WebSocket} ws - 送信元のソケット
+   * @param {Object} user - 接続ユーザー（userId, loginId, nickname）
+   * @param {string} event - イベント名
+   * @param {Object} payload - ペイロード
+   * @param {Function} respond - ack応答用の関数
+   * @returns {Promise<void>}
+   */
+  async handleEvent(ws, user, event, payload, respond) {
+    const userId = user.userId;
+    const userInfo = { loginId: user.loginId, nickname: user.nickname };
+
+    switch (event) {
+      // ---------------------------------------------------------------------
+      case "room:join": {
+        this.cleanupExpiredChat();
+        const game = this.startGameIfReady() || this.getRoomGame();
+        respond({
+          ok: true,
+          state: { room: this.getRoom(), chat: this.state.chat, game },
+        });
+        this.broadcast("room:presence", {
+          roomId: this.state.roomId,
+          count: this.presence(),
+        });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "room:leave": {
+        this.releaseUserSeats(userId);
+        respond({ ok: true });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "seat:take": {
+        const color = payload.color;
+        if (color !== "black" && color !== "white") {
+          respond({ ok: false, error: "invalid_request" });
+          return;
+        }
+
+        const result = this.assignSeat(color, userId, userInfo);
+        if (!result.ok) {
+          respond({ ok: false, error: result.reason });
+          return;
+        }
+
+        // 着席時はその席の準備状態をリセット
+        const game = this.getRoomGame();
+        if (game.status !== "playing") {
+          game.ready = {
+            black: Boolean(game.ready?.black),
+            white: Boolean(game.ready?.white),
+            [color]: false,
+          };
+          this.state.game = game;
+        }
+
+        const next = this.startGameIfReady() || this.getRoomGame();
+        this.broadcast("room:state", { room: this.getRoom(), game: next });
+        respond({ ok: true });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "seat:leave": {
+        const color = payload.color;
+        if (color !== "black" && color !== "white") {
+          respond({ ok: false, error: "invalid_request" });
+          return;
+        }
+
+        const result = this.releaseSeat(color, userId);
+        if (!result.ok) {
+          respond({ ok: false, error: result.reason });
+          return;
+        }
+
+        // 人が離席したらCPUも一緒に離席させる
+        const cpuColor = this.getCpuSeatColor();
+        if (cpuColor) {
+          this.releaseSeat(cpuColor, CPU_USER_ID);
+          this.state.cpu = null;
+          this.state.cpuMoveAt = null;
+        }
+
+        let game = this.getRoomGame();
+        if (result.statusBefore !== "playing" && game.status !== "playing") {
+          game.ready = { black: false, white: false };
+          this.state.game = game;
+        }
+
+        if (result.statusBefore === "playing") {
+          this.handleForfeit(userId);
+        }
+
+        game = this.startGameIfReady() || this.getRoomGame();
+        this.broadcast("room:state", { room: this.getRoom(), game });
+        respond({ ok: true });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "cpu:configure": {
+        const game = this.getRoomGame();
+        if (game.status === "playing") {
+          respond({ ok: false, error: "game_in_progress" });
+          return;
+        }
+
+        // --- CPU解除 ---
+        if (!payload.enabled) {
+          const cpuColor = this.getCpuSeatColor();
+          if (cpuColor) {
+            this.releaseSeat(cpuColor, CPU_USER_ID);
+          }
+          this.state.cpu = null;
+          this.state.cpuMoveAt = null;
+
+          const next = this.getRoomGame();
+          if (cpuColor) {
+            next.ready = {
+              black: Boolean(next.ready?.black),
+              white: Boolean(next.ready?.white),
+              [cpuColor]: false,
+            };
+          }
+
+          const broadcasted = this.broadcastGame(next);
+          this.broadcast("room:state", { room: this.getRoom(), game: broadcasted });
+          respond({ ok: true });
+          return;
+        }
+
+        // --- CPU有効化 ---
+        const color = payload.color;
+        if (color !== "black" && color !== "white") {
+          respond({ ok: false, error: "invalid_color" });
+          return;
+        }
+
+        const targetSeat = this.state.seats[color];
+        if (targetSeat && targetSeat.userId !== CPU_USER_ID) {
+          respond({ ok: false, error: "seat_taken" });
+          return;
+        }
+
+        // 既に別の席にCPUがいれば解放
+        const existing = this.getCpuSeatColor();
+        if (existing && existing !== color) {
+          this.releaseSeat(existing, CPU_USER_ID);
+        }
+
+        const assigned = this.assignSeat(color, CPU_USER_ID, {
+          loginId: CPU_LOGIN_ID,
+          nickname: CPU_NICKNAME,
+        });
+        if (!assigned.ok) {
+          respond({ ok: false, error: "seat_taken" });
+          return;
+        }
+
+        const resolved = resolveCpuLevel(payload.level, this.env);
+        this.state.cpu = { color, ...resolved };
+
+        const next = this.getRoomGame();
+        if (next.status !== "playing") {
+          next.ready = {
+            black: Boolean(next.ready?.black),
+            white: Boolean(next.ready?.white),
+            [color]: true,
+          };
+        }
+
+        const broadcasted = this.broadcastGame(next);
+        const started = this.startGameIfReady();
+        this.broadcast("room:state", {
+          room: this.getRoom(),
+          game: started || broadcasted,
+        });
+        respond({ ok: true });
+
+        this.scheduleCpuTurn();
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "game:ready": {
+        const color = this.getPlayerColor(userId);
+        if (!color) {
+          respond({ ok: false, error: "not_seated" });
+          return;
+        }
+
+        const result = this.setReady(color, Boolean(payload.ready));
+        if (!result.ok) {
+          respond({ ok: false, error: result.error });
+          return;
+        }
+
+        if (result.started) {
+          this.scheduleCpuTurn();
+        }
+
+        respond({ ok: true, started: Boolean(result.started) });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "game:place":
+      case "game:move": {
+        const color = this.getPlayerColor(userId);
+        if (!color) {
+          respond({ ok: false, error: "not_seated" });
+          return;
+        }
+
+        const type = event === "game:place" ? "place" : "move";
+        const action = { type, color };
+
+        if (type === "place") {
+          const row = Number(payload.row);
+          const col = Number(payload.col);
+          if (!Number.isInteger(row) || !Number.isInteger(col)) {
+            respond({ ok: false, error: "invalid_target" });
+            return;
+          }
+          action.to = { row, col };
+        } else {
+          const from = payload.from;
+          const to = payload.to;
+          if (
+            !from ||
+            !to ||
+            !Number.isInteger(from.row) ||
+            !Number.isInteger(from.col) ||
+            !Number.isInteger(to.row) ||
+            !Number.isInteger(to.col)
+          ) {
+            respond({ ok: false, error: "invalid_target" });
+            return;
+          }
+          action.from = { row: from.row, col: from.col };
+          action.to = { row: to.row, col: to.col };
+        }
+
+        const result = applyAction(this.getRoomGame(), action);
+        if (!result.ok) {
+          respond({ ok: false, error: result.error });
+          return;
+        }
+
+        if (result.state.status === "finished") {
+          result.state.ready = { black: false, white: false };
+        }
+
+        this.broadcastGame(result.state);
+        this.scheduleCpuTurn();
+        respond({ ok: true });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      case "chat:send": {
+        const raw = payload.message;
+        if (typeof raw !== "string") {
+          respond({ ok: false, error: "invalid_request" });
+          return;
+        }
+
+        const trimmed = raw.trim();
+        if (!trimmed) {
+          respond({ ok: false, error: "empty" });
+          return;
+        }
+        if (trimmed.length > CHAT_MAX_LENGTH) {
+          respond({ ok: false, error: "too_long" });
+          return;
+        }
+
+        const entry = this.addChatMessage(userId, trimmed, userInfo);
+        this.broadcast("chat:new", entry);
+        respond({ ok: true });
+        return;
+      }
+
+      // ---------------------------------------------------------------------
+      default:
+        respond({ ok: false, error: "unknown_event" });
+    }
+  }
+
+  /**
+   * 切断時の処理。座席を解放し、対局中なら不戦敗にします。
+   * @param {WebSocket} ws - 切断されたソケット
+   * @returns {Promise<void>}
+   */
+  async webSocketClose(ws) {
+    const user = ws.deserializeAttachment();
+
+    // 同じユーザーの別タブが残っている場合は席を空けない
+    if (user && !this.hasOtherSocket(user.userId, ws)) {
+      this.releaseUserSeats(user.userId);
+    }
+
+    this.broadcast("room:presence", {
+      roomId: this.state.roomId,
+      count: Math.max(0, this.presence() - 1),
+    });
+
+    await this.save();
+    await this.notifyLobby();
+  }
+
+  /**
+   * WebSocketエラー時の処理。
+   * @param {WebSocket} ws - 対象のソケット
+   * @returns {Promise<void>}
+   */
+  webSocketError(ws) {
+    return this.webSocketClose(ws);
+  }
+}
+
+export { CPU_USER_ID, CPU_LOGIN_ID, CPU_NICKNAME };

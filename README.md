@@ -40,155 +40,144 @@
 
 ### バックエンド
 
-| 技術 | バージョン | 用途 |
-|------|-----------|------|
-| Node.js | 20+ | ランタイム |
-| Express | 4.19 | Webフレームワーク |
-| Socket.io | 4.7 | WebSocket通信 |
-| better-sqlite3 | 12.5 | データベース |
-| bcrypt | 5.1 | パスワードハッシュ |
-| express-session | 1.18 | セッション管理 |
+| 技術 | 用途 |
+|------|------|
+| Cloudflare Workers | 実行環境（サーバーレス） |
+| Durable Objects | ルーム状態・対局・チャット・WebSocket接続の保持 |
+| Cloudflare D1 | ユーザー情報の永続化（SQLite） |
+| WebSocket (生) | リアルタイム通信 |
+| Web Crypto | パスワードハッシュ(PBKDF2)・セッション署名(HMAC) |
+
+> Worker 側は **外部ライブラリを一切使っていません**（`wrangler` のみ開発依存）。
+
+### アーキテクチャ
+
+```
+Cloudflare Worker
+├── 静的アセット  → client/dist を同一オリジンで配信（SPAフォールバック）
+├── /api/*        → D1（ユーザー）/ Durable Object（ルーム情報）
+└── /ws           → WebSocket を Durable Object へ橋渡し
+
+Durable Objects
+├── RoomDurableObject   … 1ルーム1インスタンス。座席・対局・チャット・CPU思考・接続を保持
+└── LobbyDurableObject  … 全ルームのサマリを集約し、ロビーへ配信
+```
+
+対局状態は Durable Object に永続化されるため、デプロイやアイドルを挟んでも失われません。
+フロントとバックが同一オリジンなので、CORS 設定やクロスサイトCookieは不要です。
 
 ## 🚀 セットアップ
 
 ### 必要条件
 
 - Node.js 20.x 以上
-- npm 10.x 以上
+- Cloudflare アカウント（無料プランで動作します）
 
 ### インストール
 
 ```bash
-# リポジトリをクローン
 git clone https://github.com/your-username/yonmoque.git
 cd yonmoque
 
-# 依存関係をインストール
 npm install
-cd client && npm install && cd ..
-cd server && npm install && cd ..
+npm --prefix client install
+npm --prefix worker install
 ```
 
-### 開発サーバーの起動
+### D1 データベースの作成
 
 ```bash
-# フロントエンド・バックエンド同時起動
+cd worker
+
+# 1. データベースを作成し、表示された database_id を wrangler.jsonc に貼り付ける
+npx wrangler d1 create yonmoque
+
+# 2. テーブルを作成（ローカル用と本番用）
+npx wrangler d1 execute yonmoque --local  --file schema.sql
+npx wrangler d1 execute yonmoque --remote --file schema.sql
+```
+
+### ローカル開発
+
+```bash
+# クライアントをビルドしてから wrangler dev を起動
 npm run dev
 ```
 
-- フロントエンド: http://localhost:5173
-- バックエンド: http://localhost:3001
+→ http://localhost:8787
 
-### 本番ビルド
+`wrangler dev` は D1 も Durable Objects もローカルでエミュレートするため、
+Cloudflare へ接続せずに全機能を試せます。
 
-```bash
-# フロントエンドをビルド
-npm run build
-
-# サーバー起動
-npm run start
-```
-
-## ⚙️ 環境変数
-
-サーバーとクライアントは `.env` ファイルで設定可能です。
-
-### 設定方法
+フロントを Vite の HMR で開発したい場合:
 
 ```bash
-# サーバー設定
-cd server
-cp env.example .env
-
-# クライアント設定（開発時のみ）
-cd client
-cp env.example .env
+npm run dev:vite      # worker(8787) と vite(5173) を同時起動
 ```
 
-### サーバー設定（server/.env）
+Vite が `/api` と `/ws` を 8787 へプロキシします。
 
-| 変数名 | デフォルト値 | 説明 |
-|--------|-------------|------|
-| `PORT` | `3001` | サーバーポート |
-| `ROOM_COUNT` | `10` | 作成するルーム数 |
-| `SESSION_SECRET` | `dev_secret_change_me` | セッション暗号化キー（**本番では必ず変更**） |
-| `CLIENT_ORIGIN` | `http://localhost:5173` | CORSで許可するオリジン |
+> デモユーザーを作るスクリプトはありません。画面から新規登録してください。
 
-> ⚠️ **注意**: `SESSION_SECRET` は本番環境では必ず安全なランダム文字列に変更してください。
-> ```bash
-> # 安全なランダム文字列を生成
-> openssl rand -base64 32
-> ```
+## ⚙️ 設定
 
-### クライアント設定（client/.env）
+設定は `worker/wrangler.jsonc` の `vars` に記述します。
 
-| 変数名 | デフォルト値 | 説明 |
-|--------|-------------|------|
-| `VITE_API_URL` | `http://localhost:3001` | バックエンドAPIのURL（開発時のプロキシ先） |
+| 変数名 | 既定値 | 説明 |
+|--------|--------|------|
+| `ROOM_COUNT` | `12` | 作成するルーム数 |
+| `CPU_MAX_DEPTH` | `2` | CPU探索の最大深度（上限として作用） |
+| `CPU_TIME_LIMIT_MS` | `8` | CPU探索の制限時間（上限として作用） |
+| `PBKDF2_ITERATIONS` | `100000` | パスワードハッシュの反復回数 |
 
-> 📝 **補足**: クライアントの環境変数は開発時のプロキシ設定に使用します。本番ビルドでは不要です。
+`SESSION_SECRET` だけは Secret として登録します。
+
+```bash
+cd worker
+npx wrangler secret put SESSION_SECRET      # openssl rand -base64 32 などで生成
+```
+
+> ローカル開発では未設定でも動きます（開発用の既定値が使われます）。
+
+### CPUの強さと料金プラン
+
+Workers の **無料プランは 1リクエストあたり CPU 10ms** の制限があります。
+既定値（深さ2 / 8ms）はこの枠に収まるよう絞ってあります。
+
+**Workers 有料プラン（$5/月）** に切り替えると CPU 時間が 30秒 まで伸びるので、
+`wrangler.jsonc` を次のように変えるだけで本来の強さに戻ります。
+
+```jsonc
+"CPU_MAX_DEPTH": "5",
+"CPU_TIME_LIMIT_MS": "700"
+```
 
 ## 🌐 デプロイ
 
-### 要件
-
-- **Node.js 20.x** 以上が動作するサーバー
-- **永続ストレージ**（SQLiteデータベース用）
-- **WebSocket対応**（Socket.io使用のため）
-
-### ビルド手順
-
 ```bash
-# 1. フロントエンドをビルド
-cd client
-npm install
-npm run build
-
-# 2. サーバーの依存関係をインストール
-cd ../server
-npm install
+# クライアントをビルドして Worker ごとデプロイ
+npm run deploy
 ```
 
-ビルド後、`client/dist/` に静的ファイルが生成されます。
+初回のみ、事前に以下を済ませておいてください。
 
-### 起動
-
-```bash
-cd server
-npm start
-```
-
-### 本番環境の環境変数
-
-```bash
-NODE_ENV=production
-PORT=3001
-SESSION_SECRET=<安全なランダム文字列>
-CLIENT_ORIGIN=https://your-domain.com
-ROOM_COUNT=10
-```
+1. `npx wrangler d1 create yonmoque` で作った `database_id` を `worker/wrangler.jsonc` に反映
+2. `npx wrangler d1 execute yonmoque --remote --file schema.sql` でテーブル作成
+3. `npx wrangler secret put SESSION_SECRET` で署名鍵を登録
 
 ### 注意事項
 
-1. **永続ストレージ**
-   - SQLiteデータベースは `server/data/app.db` に保存されます
-   - コンテナ環境では永続ボリュームをマウントしてください
+1. **永続化の範囲**
+   - ユーザー情報は D1（`users` テーブル）
+   - ルーム・座席・対局・チャットは Durable Object のストレージ
+   - チャットは最終発言から30分で自動削除されます
 
-2. **WebSocket**
-   - リバースプロキシ使用時はWebSocketの転送設定が必要です
-   - Nginxの場合:
-     ```nginx
-     location /socket.io/ {
-         proxy_pass http://localhost:3001;
-         proxy_http_version 1.1;
-         proxy_set_header Upgrade $http_upgrade;
-         proxy_set_header Connection "upgrade";
-     }
-     ```
+2. **無料プランの上限**
+   - Durable Objects: 10万リクエスト/日（WebSocketのメッセージも消費します）
+   - Durable Objects は **SQLiteバックエンドのみ**利用可能（設定済み）
 
-3. **静的ファイル配信**
-   - 本番環境ではサーバーから `client/dist/` を配信するか
-   - CDNから静的ファイルを配信してください
+3. **Durable Object の配置**
+   - 最初にアクセスされた地域の近くに作られ、以後そこに固定されます
 
 ## 📝 API エンドポイント
 
@@ -206,6 +195,15 @@ ROOM_COUNT=10
 
 ### WebSocket Events
 
+`/ws?roomId=N`（対局ルーム）と `/ws?lobby=1`（ロビー）の2種類の接続があります。
+メッセージ形式は Socket.io 互換ではなく、以下の最小プロトコルです。
+
+```
+送信 { t: 'req', id, event, payload }   // id を付けると ack が返る
+受信 { t: 'res', id, payload }          // ack
+受信 { t: 'ev',  event, payload }       // サーバーからのプッシュ
+```
+
 | イベント | 方向 | 説明 |
 |---------|------|------|
 | `room:join` | → Server | ルーム入室 |
@@ -221,6 +219,9 @@ ROOM_COUNT=10
 | `room:state` | ← Server | ルーム状態更新 |
 | `game:state` | ← Server | ゲーム状態更新 |
 | `chat:new` | ← Server | 新着チャット |
+| `chat:cleared` | ← Server | チャット履歴の期限切れ |
+| `room:presence` | ← Server | 在室人数の更新 |
+| `room:forfeit` | ← Server | 対局中の離脱（不戦敗） |
 
 ## 🤖 CPU AI について
 
@@ -233,10 +234,15 @@ CPUは**ミニマックス法**（アルファベータ枝刈り）を使用し�
 | Hard | 4 | 420ms |
 | Strong | 5 | 700ms |
 
+上の値は「難易度ごとの上限」で、実際には `CPU_MAX_DEPTH` / `CPU_TIME_LIMIT_MS` で
+さらに切り詰められます（無料プランの既定は深さ2 / 8ms）。
+
 評価関数は以下の要素を考慮:
 - **ラインスコア**: 連続した駒の数（4目リーチは高得点）
 - **駒数スコア**: 盤面上の駒の差
-- **機動力スコア**: 選択可能なアクション数
+- **機動力スコア**: 動かせる先の空きマス数と打てる手数の概算
+
+手番のプレイヤーに合法手が無い場合は自動的にパスし、双方とも手が無ければ引き分けになります。
 
 ## 📜 ライセンス
 ヨンモクゲームの原作は [logygames](https://www.logygames.com/yonmoque/) 様に帰属します。

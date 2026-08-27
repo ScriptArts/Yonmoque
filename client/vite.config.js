@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
+import process from 'node:process'
 import { fileURLToPath } from 'url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -11,8 +12,8 @@ export default defineConfig(({ mode }) => {
   // 環境変数を読み込み
   const env = loadEnv(mode, process.cwd(), '')
   
-  // バックエンドAPIのURL（デフォルト: http://localhost:3001）
-  const apiUrl = env.VITE_API_URL || 'http://localhost:3001'
+  // バックエンドAPIのURL（デフォルト: wrangler dev の http://localhost:8787）
+  const apiUrl = env.VITE_API_URL || 'http://localhost:8787'
 
   return {
     plugins: [react()],
@@ -24,7 +25,7 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/api': apiUrl,
-        '/socket.io': {
+        '/ws': {
           target: apiUrl,
           ws: true,
         },

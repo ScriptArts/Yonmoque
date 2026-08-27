@@ -1,0 +1,15 @@
+{
+  "name": "yonmoque-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute yonmoque --local --file schema.sql",
+    "db:remote": "wrangler d1 execute yonmoque --remote --file schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

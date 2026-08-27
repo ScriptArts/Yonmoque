@@ -7,13 +7,13 @@
  * @module ai
  */
 
-const {
+import {
   BOARD_SIZE,
   MAX_PIECES,
   getCellType,
   getOpponent,
   applyAction,
-} = require("./game");
+} from "./game.js";
 
 /**
  * 8方向の移動ベクトル
@@ -234,6 +234,52 @@ function lineCounts(board, color) {
 }
 
 /**
+ * 実行可能な手数の概算を返します。
+ *
+ * 正確な手数は listActions() で得られますが、末端評価から毎回呼ぶには重いため、
+ * 「自分の駒に隣接する空きマスの数」＋「持ち駒が残っていれば空きマスの数」で近似します。
+ * 斜めスライドは数えませんが、評価は差分でしか使わないため実用上問題ありません。
+ *
+ * @param {Object} state - ゲーム状態
+ * @param {'black'|'white'} color - 対象プレイヤーの色
+ * @returns {number} 手数の概算
+ */
+function countMobility(state, color) {
+  const board = state.board;
+  let mobility = 0;
+  let emptyCells = 0;
+
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      const cell = board[row][col];
+
+      if (cell === null) {
+        emptyCells += 1;
+        continue;
+      }
+      if (cell !== color) {
+        continue;
+      }
+
+      for (const [dr, dc] of DIRECTIONS) {
+        const nextRow = row + dr;
+        const nextCol = col + dc;
+        if (inBounds(nextRow, nextCol) && board[nextRow][nextCol] === null) {
+          mobility += 1;
+        }
+      }
+    }
+  }
+
+  // 持ち駒が残っていれば空きマスすべてが「打つ」手になる
+  if ((state.placed[color] || 0) < MAX_PIECES) {
+    mobility += emptyCells;
+  }
+
+  return mobility;
+}
+
+/**
  * ゲーム状態を評価し、スコアを返します。
  * 正のスコアは指定プレイヤーに有利、負のスコアは不利を示します。
  *
@@ -255,6 +301,7 @@ function evaluateState(state, color) {
     if (state.winner) {
       return -100000;  // 敗北
     }
+    return 0;          // 引き分け（双方とも合法手なし）
   }
 
   const opponent = getOpponent(color);
@@ -278,8 +325,10 @@ function evaluateState(state, color) {
     (countPieces(state.board, color) - countPieces(state.board, opponent)) * 5;
 
   // 機動力スコア（選択肢の多さ）
+  // listActions() は配列とSetを確保するため末端評価で呼ぶには重すぎる。
+  // 隣接する空きマス数＋打てる手数による近似で代用する。
   const mobilityScore =
-    (listActions(state, color).length - listActions(state, opponent).length) * 2;
+    (countMobility(state, color) - countMobility(state, opponent)) * 2;
 
   return lineScore + pieceScore + mobilityScore;
 }
@@ -332,9 +381,10 @@ function searchBestMove(state, color, options = {}) {
    * @param {number} depth - 残り探索深度
    * @param {number} alpha - アルファ値（最大化側の下限）
    * @param {number} beta - ベータ値（最小化側の上限）
+   * @param {boolean} [isRoot=false] - 探索の根ノードかどうか
    * @returns {Object} 評価結果
    */
-  const evaluateAtDepth = (current, depth, alpha, beta) => {
+  const evaluateAtDepth = (current, depth, alpha, beta, isRoot = false) => {
     // 時間切れチェック
     if (Date.now() > deadline) {
       return { score: evaluateState(current, color), timedOut: true };
@@ -362,6 +412,9 @@ function searchBestMove(state, color, options = {}) {
     const maximizing = current.turn === color;
     let bestScore = maximizing ? -Infinity : Infinity;
     let bestAction = null;
+    // 根ノードで同点の手が複数あった場合にランダムで選ぶためのカウンタ
+    // （毎回まったく同じ棋譜になるのを防ぐ）
+    let tieCount = 0;
 
     // 各アクションを試行
     for (const action of actions) {
@@ -383,6 +436,13 @@ function searchBestMove(state, color, options = {}) {
         if (child.score > bestScore) {
           bestScore = child.score;
           bestAction = action;
+          tieCount = 1;
+        } else if (isRoot && child.score === bestScore) {
+          // 同点の手はリザーバサンプリングで等確率に選ぶ
+          tieCount += 1;
+          if (Math.random() * tieCount < 1) {
+            bestAction = action;
+          }
         }
         alpha = Math.max(alpha, bestScore);
         // ベータカット
@@ -411,7 +471,7 @@ function searchBestMove(state, color, options = {}) {
   // 反復深化: 深度1から徐々に深く探索
   let best = null;
   for (let depth = 1; depth <= maxDepth; depth += 1) {
-    const result = evaluateAtDepth(state, depth, -Infinity, Infinity);
+    const result = evaluateAtDepth(state, depth, -Infinity, Infinity, true);
 
     // 時間切れなら前回の結果を使用
     if (result.timedOut) {
@@ -430,11 +490,65 @@ function searchBestMove(state, color, options = {}) {
 
   // フォールバック: 最初の有効なアクションを返す
   const fallback = listActions(state, color);
-  return fallback.length > 0 ? fallback[0] : null;
+  if (fallback.length === 0) {
+    return null;
+  }
+  return fallback[Math.floor(Math.random() * fallback.length)];
 }
 
-module.exports = {
+// =============================================================================
+// CPU難易度
+// =============================================================================
+
+/**
+ * CPUの難易度ごとの探索設定。
+ *
+ * Cloudflare Workers の無料プランは 1リクエストあたり CPU 10ms のため、
+ * ここの既定値のままでは超過します。実際に使う値は resolveCpuLevel() が
+ * 環境変数 CPU_MAX_DEPTH / CPU_TIME_LIMIT_MS で上書きします。
+ *
+ * @type {Object<string, {maxDepth: number, timeLimitMs: number}>}
+ */
+const CPU_LEVELS = {
+  easy: { maxDepth: 2, timeLimitMs: 120 },
+  normal: { maxDepth: 3, timeLimitMs: 240 },
+  hard: { maxDepth: 4, timeLimitMs: 420 },
+  strong: { maxDepth: 5, timeLimitMs: 700 },
+};
+
+/**
+ * 難易度名と環境変数から、実際に使う探索設定を決定します。
+ *
+ * CPU_MAX_DEPTH / CPU_TIME_LIMIT_MS が設定されている場合は上限として作用し、
+ * 難易度ごとの値がそれを超えないよう切り詰めます。
+ * （無料プランでは小さい値、有料プランに切り替えたら大きい値を設定する）
+ *
+ * @param {string} levelName - 難易度名（easy/normal/hard/strong）
+ * @param {Object} [env={}] - Workers の環境変数
+ * @returns {{level: string, maxDepth: number, timeLimitMs: number}} 探索設定
+ */
+function resolveCpuLevel(levelName, env = {}) {
+  const level = CPU_LEVELS[levelName] ? levelName : "strong";
+  const base = CPU_LEVELS[level];
+
+  const depthCap = Number(env.CPU_MAX_DEPTH);
+  const timeCap = Number(env.CPU_TIME_LIMIT_MS);
+
+  return {
+    level,
+    maxDepth: Number.isFinite(depthCap) && depthCap > 0
+      ? Math.min(base.maxDepth, depthCap)
+      : base.maxDepth,
+    timeLimitMs: Number.isFinite(timeCap) && timeCap > 0
+      ? Math.min(base.timeLimitMs, timeCap)
+      : base.timeLimitMs,
+  };
+}
+
+export {
   listActions,
   evaluateState,
   searchBestMove,
+  CPU_LEVELS,
+  resolveCpuLevel,
 };

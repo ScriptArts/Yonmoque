@@ -1,0 +1,57 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yonmoque",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-26",
+
+  // client/dist を同一オリジンで配信する。
+  // run_worker_first に列挙したパスだけ Worker スクリプトが先に処理し、
+  // それ以外は静的ファイル（無ければ index.html にフォールバック）を返す。
+  "assets": {
+    "directory": "../client/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/ws"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "yonmoque",
+      // wrangler d1 create yonmoque / MCP で発行済み (APAC)
+      "database_id": "148b94e5-e613-4b5a-a064-a4145e6f1a51"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM", "class_name": "RoomDurableObject" },
+      { "name": "LOBBY", "class_name": "LobbyDurableObject" }
+    ]
+  },
+
+  // 無料プランでは SQLite バックエンドの Durable Object のみ利用可能
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RoomDurableObject", "LobbyDurableObject"]
+    }
+  ],
+
+  "vars": {
+    "ROOM_COUNT": "12",
+
+    // --- CPU対戦AIの探索上限 ---
+    // 無料プランは CPU 10ms/リクエストのため小さく絞っている。
+    // Workers 有料プラン($5/月)に切り替えたら "5" / "700" にすると
+    // 元の強さ（strong = 深さ5 / 700ms）に戻る。
+    "CPU_MAX_DEPTH": "2",
+    "CPU_TIME_LIMIT_MS": "8",
+
+    // パスワードハッシュの反復回数
+    "PBKDF2_ITERATIONS": "100000"
+  }
+
+  // SESSION_SECRET は vars ではなく Secret として登録する:
+  //   npx wrangler secret put SESSION_SECRET
+}
