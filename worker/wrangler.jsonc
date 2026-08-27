@@ -16,10 +16,14 @@
 
   // 独自ドメイン。custom_domain: true にすると wrangler が
   // scriptarts.jp ゾーンの DNS レコードも作成・更新する。
-  // workers.dev のURL (yonmoque.scriptarts.workers.dev) も引き続き有効。
   "routes": [
     { "pattern": "yonmoque.scriptarts.jp", "custom_domain": true }
   ],
+
+  // routes を書くと workers_dev は自動的に false と解釈される。
+  // 独自ドメインの設定が失敗したときに Worker へ到達する手段が
+  // 一切なくなるため、明示的に true にして workers.dev を残す。
+  "workers_dev": true,
 
   "d1_databases": [
     {
