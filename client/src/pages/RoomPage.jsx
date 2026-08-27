@@ -455,49 +455,64 @@ export default function RoomPage() {
     <div className="flex flex-col gap-3 lg:h-full lg:min-h-0">
       <div className="flex shrink-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-baseline gap-3">
-          <h2 className="truncate text-xl font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
+          <h2 className="truncate text-lg font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
           <p className="shrink-0 text-xs text-muted-foreground">観戦: {presence}人</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
-          ロビーへ戻る
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {/*
+            対局中に同じタブで遷移すると WebSocket が切れて不戦敗になるため、
+            必ず別タブで開く。
+          */}
+          <Button variant="outline" size="sm" asChild>
+            <a
+              href="https://www.logygames.com/yonmoque/j-rule.html"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ルール
+            </a>
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
+            ロビーへ戻る
+          </Button>
+        </div>
       </div>
 
-      {error && <div className="shrink-0 rounded-md bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">{error}</div>}
-      {notice && <div className="shrink-0 rounded-md border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">{notice}</div>}
+      {error && <div className="shrink-0 rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-xs font-medium text-destructive">{error}</div>}
+      {notice && <div className="shrink-0 rounded-sm border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary">{notice}</div>}
 
       <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_300px]">
         <Card className="flex flex-col lg:min-h-0 lg:overflow-hidden">
           <CardHeader className="shrink-0 p-3">
             <div className="flex flex-wrap gap-1.5 text-[11px]">
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 状態: {statusLabel(room?.status || 'waiting')}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 あなた: {mySeatText}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 対局: {gameStatusLabel(game?.status || 'waiting')}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 手番: {turnLabel}
               </div>
               {game?.status === 'playing' && game?.passed && (
-                <div className="inline-flex items-center rounded-md bg-secondary/15 px-2 py-0.5 font-medium text-secondary">
+                <div className="inline-flex items-center rounded-sm border border-secondary/40 px-2 py-0.5 font-medium text-secondary">
                   {seatLabel(game.passed)}は打つ手がないためパス
                 </div>
               )}
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 準備: 黒 {ready.black ? '●' : '○'} / 白 {ready.white ? '●' : '○'}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
+              <div className="inline-flex items-center rounded-sm border px-2 py-0.5 font-medium text-muted-foreground">
                 持ち駒: 黒 {Math.max(0, 6 - (placed.black || 0))} / 白 {Math.max(0, 6 - (placed.white || 0))}
               </div>
             </div>
           </CardHeader>
           <CardContent className="flex flex-col items-center gap-2 p-3 pt-0 lg:min-h-0 lg:flex-1">
             {resultLabel && (
-              <div className="w-full shrink-0 rounded-md border border-primary/20 bg-primary/10 px-3 py-1.5 text-center text-xs font-medium text-primary">
+              <div className="w-full shrink-0 rounded-sm border border-primary/30 bg-primary/5 px-3 py-1.5 text-center text-xs font-medium text-primary">
                 {resultLabel}
               </div>
             )}
@@ -509,8 +524,8 @@ export default function RoomPage() {
               lg 未満（スマホ・縦置き）は従来どおり横幅基準で、ページ側にスクロールを許す。
             */}
             <div className="flex w-full items-center justify-center lg:min-h-0 lg:flex-1 lg:[container-type:size]">
-              <div className="relative mx-auto aspect-square w-full max-w-[500px] rounded-2xl border-4 border-border bg-white p-3 shadow-lg lg:w-[min(100cqw,100cqh)] lg:max-w-[600px]">
-                <img className="block h-full w-full opacity-60" src="/board.svg" alt="盤面" />
+              <div className="relative mx-auto aspect-square w-full max-w-[500px] rounded-sm border bg-white p-3 lg:w-[min(100cqw,100cqh)] lg:max-w-[600px]">
+                <img className="block h-full w-full opacity-75" src="/board.svg" alt="盤面" />
                 <div className="absolute inset-3 grid grid-cols-5 grid-rows-5 p-[3.2%]">
                   {board.map((row, rowIndex) =>
                     row.map((cell, colIndex) => {
@@ -521,23 +536,32 @@ export default function RoomPage() {
                         <button
                           key={key}
                           type="button"
-                          className={cn(
-                            "flex items-center justify-center rounded-full transition-colors relative",
-                            "hover:bg-primary/10",
-                            isSelected && "shadow-[0_0_0_2px] shadow-secondary bg-secondary/10",
-                            isMoveable && "bg-primary/15"
-                          )}
+                          className="group/cell relative flex items-center justify-center"
                           onClick={() => handleCellClick(rowIndex, colIndex)}
                           aria-label={`セル ${rowIndex + 1}-${colIndex + 1}`}
                         >
+                          {/*
+                            ハイライトはボタン自体ではなく駒と同じ 70% の円に描く。
+                            ボタンを塗るとマス全体が円になり、盤に描かれた枠から
+                            はみ出して見えるため。
+                          */}
+                          <span
+                            className={cn(
+                              "pointer-events-none absolute h-[70%] w-[70%] rounded-full transition-colors",
+                              isSelected
+                                ? "bg-secondary/15 ring-2 ring-secondary"
+                                : "group-hover/cell:bg-primary/10"
+                            )}
+                          />
                           {cell && (
                             <span className={cn(
-                              "w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
+                              "relative w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
                               cell === 'black' ? "bg-gray-900 border border-gray-800" : "bg-gray-100 border border-gray-300"
                             )} />
                           )}
+                          {/* 移動先の目印。塗り円ではなく小さな点にして盤面を汚さない */}
                           {isMoveable && !cell && (
-                            <span className="w-[18%] aspect-square rounded-full bg-primary opacity-50" />
+                            <span className="pointer-events-none relative w-[22%] aspect-square rounded-full bg-primary/70" />
                           )}
                         </button>
                       )
@@ -549,6 +573,15 @@ export default function RoomPage() {
 
             <p className="shrink-0 text-center text-[11px] text-muted-foreground">
               両者が開始を押すと対局開始。空きマスクリックで配置、駒を選択して移動。
+              {' '}
+              <a
+                href="https://www.logygames.com/yonmoque/j-rule.html"
+                target="_blank"
+                rel="noreferrer"
+                className="underline decoration-border underline-offset-2 hover:text-foreground hover:decoration-foreground"
+              >
+                ルール
+              </a>
             </p>
           </CardContent>
         </Card>
@@ -559,10 +592,10 @@ export default function RoomPage() {
               <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">着席</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 p-3 pt-0">
-              <div className="space-y-1.5 rounded-lg border bg-card p-2.5">
+              <div className="space-y-1.5 rounded-sm border p-2.5">
                 <div className="flex items-center gap-2">
                   <span className="inline-block h-3 w-3 rounded-full bg-gray-900 border border-gray-700" />
-                  <span className="text-sm font-medium text-primary">黒席</span>
+                  <span className="text-sm font-medium">黒席</span>
                 </div>
                 <div className="truncate font-mono text-sm font-semibold">{displayName(room?.seats.black)}</div>
                 {mySeat === 'black' ? (
@@ -593,10 +626,10 @@ export default function RoomPage() {
                 ) : null}
               </div>
 
-              <div className="space-y-1.5 rounded-lg border bg-card p-2.5">
+              <div className="space-y-1.5 rounded-sm border p-2.5">
                 <div className="flex items-center gap-2">
                   <span className="inline-block h-3 w-3 rounded-full bg-white border border-gray-300" />
-                  <span className="text-sm font-medium text-primary">白席</span>
+                  <span className="text-sm font-medium">白席</span>
                 </div>
                 <div className="truncate font-mono text-sm font-semibold">{displayName(room?.seats.white)}</div>
                 {mySeat === 'white' ? (
@@ -630,7 +663,7 @@ export default function RoomPage() {
           </Card>
 
           {cpuError && (
-            <div className="shrink-0 rounded-md bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
+            <div className="shrink-0 rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-xs font-medium text-destructive">
               {cpuError}
             </div>
           )}
@@ -646,7 +679,7 @@ export default function RoomPage() {
                   <div className="py-4 text-center text-sm text-muted-foreground">まだメッセージはありません。</div>
                 ) : (
                   chat.map((entry) => (
-                    <div key={entry.id} className="rounded-lg bg-muted/40 p-2">
+                    <div key={entry.id} className="rounded-sm bg-muted/50 p-2">
                       <div className="mb-0.5 flex items-center justify-between text-[11px] text-muted-foreground">
                         <span className="truncate font-mono font-semibold text-primary">
                           {entry.nickname || '名無しプレイヤー'}

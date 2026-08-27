@@ -19,7 +19,7 @@ import {
   normalizeState,
   applyAction,
 } from "./game.js";
-import { searchBestMove, resolveCpuLevel } from "./ai.js";
+import { searchRootBatch, resolveCpuLevel, positionKey } from "./ai.js";
 import { encodeEvent, encodeResponse, decodeMessage, PING, PONG } from "./protocol.js";
 
 /** CPUプレイヤーを表す擬似ユーザーID（D1には作らない） */
@@ -33,6 +33,15 @@ const CPU_NICKNAME = "CPU";
 
 /** CPUが着手するまでの遅延（人間らしく見せるため） */
 const CPU_DELAY_MS = 350;
+
+/**
+ * 思考を分割して続ける際の、次のアラームまでの間隔。
+ *
+ * 無料プランは 1リクエストあたり CPU 10ms しか使えないため、深く読むには
+ * 探索を複数のアラームに分けるしかない。1回あたりのCPU時間は
+ * nodeBudget で頭打ちになり、maxTicks 回まで続きを読む。
+ */
+const CPU_TICK_MS = 50;
 
 /** チャット履歴の保持時間（最終発言から30分） */
 const CHAT_TTL_MS = 30 * 60 * 1000;
@@ -79,6 +88,7 @@ export class RoomDurableObject extends DurableObject {
       chatExpiresAt: null,
       cpu: null,
       cpuMoveAt: null,
+      cpuSearch: null,
     };
   }
 
@@ -413,15 +423,19 @@ export class RoomDurableObject extends DurableObject {
     const cpu = this.state.cpu;
     if (!cpu) {
       this.state.cpuMoveAt = null;
+      this.state.cpuSearch = null;
       return;
     }
 
     const game = this.getRoomGame();
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
+      this.state.cpuSearch = null;
       return;
     }
 
+    // 局面が変わったので、前の手番の途中結果は使わない
+    this.state.cpuSearch = null;
     this.state.cpuMoveAt = Date.now() + CPU_DELAY_MS;
   }
 
@@ -441,10 +455,43 @@ export class RoomDurableObject extends DurableObject {
     const game = this.getRoomGame();
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
+      this.state.cpuSearch = null;
       return;
     }
 
-    const action = searchBestMove(game, cpu.color, cpu);
+    // 局面の指紋。途中結果が別の局面のものなら捨てる。
+    const signature = positionKey(game);
+    let search = this.state.cpuSearch;
+    if (!search || search.signature !== signature) {
+      search = { signature, index: 0, ticks: 0, bestScore: null, bestAction: null };
+    }
+
+    const batch = searchRootBatch(game, cpu.color, {
+      depth: cpu.depth,
+      startIndex: search.index,
+      nodeBudget: cpu.nodeBudget,
+      // -Infinity は保存に向かないので null で持ち回す
+      bestScore: search.bestScore === null ? -Infinity : search.bestScore,
+      bestAction: search.bestAction,
+    });
+
+    search.index = batch.nextIndex;
+    search.ticks += 1;
+    search.bestScore = Number.isFinite(batch.bestScore) ? batch.bestScore : null;
+    search.bestAction = batch.bestAction;
+
+    // まだ読み残しがあり、回数の上限にも達していないなら続きを次のアラームで読む。
+    // 1回あたりのCPU時間は nodeBudget で頭打ちになっている。
+    const finished = batch.done || search.ticks >= cpu.maxTicks;
+    if (!finished && batch.bestAction) {
+      this.state.cpuSearch = search;
+      this.state.cpuMoveAt = Date.now() + CPU_TICK_MS;
+      return;
+    }
+
+    this.state.cpuSearch = null;
+
+    const action = batch.bestAction;
     if (!action) {
       this.state.cpuMoveAt = null;
       return;
