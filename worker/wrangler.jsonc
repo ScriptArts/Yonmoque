@@ -14,6 +14,13 @@
     "run_worker_first": ["/api/*", "/ws"]
   },
 
+  // 独自ドメイン。custom_domain: true にすると wrangler が
+  // scriptarts.jp ゾーンの DNS レコードも作成・更新する。
+  // workers.dev のURL (yonmoque.scriptarts.workers.dev) も引き続き有効。
+  "routes": [
+    { "pattern": "yonmoque.scriptarts.jp", "custom_domain": true }
+  ],
+
   "d1_databases": [
     {
       "binding": "DB",
