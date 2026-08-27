@@ -18,8 +18,8 @@
     {
       "binding": "DB",
       "database_name": "yonmoque",
-      // wrangler d1 create yonmoque で発行されたIDに差し替える
-      "database_id": "REPLACE_WITH_DATABASE_ID"
+      // wrangler d1 create yonmoque / MCP で発行済み (APAC)
+      "database_id": "148b94e5-e613-4b5a-a064-a4145e6f1a51"
     }
   ],
 
