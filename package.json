@@ -2,9 +2,12 @@
   "name": "yonmoque",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "dev": "npm --prefix client run build && npm --prefix worker run dev",
+    "dev:vite": "concurrently \"npm --prefix worker run dev\" \"npm --prefix client run dev\"",
     "build": "npm --prefix client run build",
-    "start": "npm --prefix server run start"
+    "deploy": "npm --prefix client run build && npm --prefix worker run deploy",
+    "db:local": "npm --prefix worker run db:local",
+    "db:remote": "npm --prefix worker run db:remote"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

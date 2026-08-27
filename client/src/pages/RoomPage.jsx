@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { apiGet } from '../api'
-import { useAuth } from '../App'
-import { getSocket } from '../socket'
+import { useAuth } from '../auth'
+import { getRoomSocket, closeRoomSocket } from '../socket'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -138,7 +138,7 @@ export default function RoomPage() {
 
   useEffect(() => {
     let active = true
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
 
     const handleRoomState = (payload) => {
       if (!payload || payload.room?.id !== numericRoomId) {
@@ -193,16 +193,21 @@ export default function RoomPage() {
     socket.on('room:forfeit', handleForfeit)
     socket.on('game:state', handleGameState)
 
-    socket.emit('room:join', { roomId: numericRoomId }, (response) => {
-      if (!active) return
-      if (!response || !response.ok) {
-        setError('入室に失敗しました。')
-        return
-      }
-      setRoom(response.state.room)
-      setChat(response.state.chat)
-      setGame(response.state.game)
-    })
+    // 接続完了（再接続を含む）のたびに入室し直して状態を同期する。
+    // 未接続の間の emit はソケット側でキューされるため取りこぼしはない。
+    const handleConnect = () => {
+      socket.emit('room:join', { roomId: numericRoomId }, (response) => {
+        if (!active) return
+        if (!response || !response.ok) {
+          setError('入室に失敗しました。')
+          return
+        }
+        setRoom(response.state.room)
+        setChat(response.state.chat)
+        setGame(response.state.game)
+      })
+    }
+    socket.on('connect', handleConnect)
 
     apiGet(`/api/rooms/${numericRoomId}`)
       .then((data) => {
@@ -216,13 +221,15 @@ export default function RoomPage() {
 
     return () => {
       active = false
-      socket.emit('room:leave')
+      socket.off('connect', handleConnect)
       socket.off('room:state', handleRoomState)
       socket.off('room:presence', handlePresence)
       socket.off('chat:new', handleChatNew)
       socket.off('chat:cleared', handleChatClear)
       socket.off('room:forfeit', handleForfeit)
       socket.off('game:state', handleGameState)
+      // 接続を閉じるとサーバー側で離席・不戦敗処理が走る
+      closeRoomSocket()
     }
   }, [numericRoomId])
 
@@ -231,7 +238,7 @@ export default function RoomPage() {
   }, [chat])
 
   const handleSeat = (color) => {
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit('seat:take', { roomId: numericRoomId, color }, (response) => {
       if (!response?.ok) {
         setError('席が埋まっています。')
@@ -242,7 +249,7 @@ export default function RoomPage() {
   }
 
   const handleSeatLeave = (color) => {
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit('seat:leave', { roomId: numericRoomId, color }, (response) => {
       if (!response?.ok) {
         setError('席の退出に失敗しました。')
@@ -254,7 +261,7 @@ export default function RoomPage() {
 
   const handleCpuEnable = (color) => {
     setCpuError('')
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit(
       'cpu:configure',
       { roomId: numericRoomId, enabled: true, color, level: 'strong' },
@@ -274,7 +281,7 @@ export default function RoomPage() {
 
   const handleCpuDisable = () => {
     setCpuError('')
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit(
       'cpu:configure',
       { roomId: numericRoomId, enabled: false },
@@ -295,7 +302,7 @@ export default function RoomPage() {
     if (!message.trim()) {
       return
     }
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit(
       'chat:send',
       { roomId: numericRoomId, message },
@@ -343,6 +350,7 @@ export default function RoomPage() {
       : new Set()
   const resultLabel = (() => {
     if (!game || game.status !== 'finished') return ''
+    if (game.result === 'draw') return '引き分け(双方とも打つ手がありません)'
     if (!game.winner) return '対局終了'
     if (game.result === 'four') return `${seatLabel(game.winner)}の勝ち(4目)`
     if (game.result === 'five') return `${seatLabel(game.winner)}の勝ち(5目のため負け)`
@@ -354,7 +362,7 @@ export default function RoomPage() {
 
   const handleReadyToggle = () => {
     if (!mySeat) return
-    const socket = getSocket()
+    const socket = getRoomSocket(numericRoomId)
     socket.emit(
       'game:ready',
       { roomId: numericRoomId, ready: !ready[mySeat] },
@@ -397,7 +405,7 @@ export default function RoomPage() {
           setError('そのマスには移動できません。')
           return
         }
-        const socket = getSocket()
+        const socket = getRoomSocket(numericRoomId)
         socket.emit(
           'game:move',
           { roomId: numericRoomId, from: selected, to: { row, col } },
@@ -425,7 +433,7 @@ export default function RoomPage() {
         setError('持ち駒がありません。')
         return
       }
-      const socket = getSocket()
+      const socket = getRoomSocket(numericRoomId)
       socket.emit(
         'game:place',
         { roomId: numericRoomId, row, col },
@@ -473,6 +481,11 @@ export default function RoomPage() {
               <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
                 手番: {turnLabel}
               </div>
+              {game?.status === 'playing' && game?.passed && (
+                <div className="inline-flex items-center rounded-md bg-secondary/15 px-2 py-1 font-medium text-secondary">
+                  {seatLabel(game.passed)}は打つ手がないためパス
+                </div>
+              )}
               <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
                 準備: 黒 {ready.black ? '●' : '○'} / 白 {ready.white ? '●' : '○'}
               </div>

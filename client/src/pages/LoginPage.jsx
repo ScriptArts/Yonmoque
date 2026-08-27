@@ -11,7 +11,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiPost } from '../api'
-import { useAuth } from '../App'
+import { useAuth } from '../auth'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"

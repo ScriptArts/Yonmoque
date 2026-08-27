@@ -1,17 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { apiGet, apiPost } from './api'
 import { resetSocket } from './socket'
+import { AuthContext, useAuth } from './auth'
 import LoginPage from './pages/LoginPage.jsx'
 import LobbyPage from './pages/LobbyPage.jsx'
 import RoomPage from './pages/RoomPage.jsx'
 import { Button } from "@/components/ui/button"
-
-const AuthContext = createContext(null)
-
-export function useAuth() {
-  return useContext(AuthContext)
-}
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth()

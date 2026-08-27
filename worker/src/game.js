@@ -96,6 +96,7 @@ function createWaitingState() {
     winner: null,                     // 勝者
     result: null,                     // 終了理由
     lastMove: null,                   // 最後の手
+    passed: null,                     // 直前にパスしたプレイヤーの色
   };
 }
 
@@ -114,6 +115,7 @@ function createNewGameState() {
     winner: null,
     result: null,
     lastMove: null,
+    passed: null,
   };
 }
 
@@ -166,6 +168,7 @@ function normalizeState(state) {
     winner: state.winner || null,
     result: state.result || null,
     lastMove: state.lastMove || null,
+    passed: state.passed === 'black' || state.passed === 'white' ? state.passed : null,
   };
 }
 
@@ -176,6 +179,53 @@ function normalizeState(state) {
  */
 function getOpponent(color) {
   return color === 'black' ? 'white' : 'black';
+}
+
+/**
+ * 指定色のプレイヤーに合法手が1つでも存在するかを判定します。
+ *
+ * 「打つ」は持ち駒が残っていて空きマスがあれば可能。
+ * 「動かす」は自分の駒の隣接8マスに空きがあれば可能
+ * （斜めスライドは経路の1マス目が空いている必要があるため、
+ *   1マス移動が全て塞がれている場合はスライドも成立しない）。
+ *
+ * @param {Object} state - ゲーム状態（正規化済み）
+ * @param {'black'|'white'} color - 判定するプレイヤーの色
+ * @returns {boolean} 合法手があればtrue
+ */
+function hasLegalAction(state, color) {
+  const board = state.board;
+  const placed = state.placed || { black: 0, white: 0 };
+  const canPlace = (placed[color] || 0) < MAX_PIECES;
+
+  const stepDirections = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+    [1, 1], [1, -1], [-1, 1], [-1, -1],
+  ];
+
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      const cell = board[row][col];
+
+      // 空きマスがあり持ち駒が残っていれば「打つ」が可能
+      if (cell === null && canPlace) {
+        return true;
+      }
+
+      // 自分の駒の隣に空きがあれば「動かす」が可能
+      if (cell === color) {
+        for (const [dr, dc] of stepDirections) {
+          const nextRow = row + dr;
+          const nextCol = col + dc;
+          if (inBounds(nextRow, nextCol) && board[nextRow][nextCol] === null) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -487,8 +537,22 @@ function applyAction(state, action) {
     next.winner = color;
     next.result = 'four';
   } else {
-    // ゲーム続行、手番交代
-    next.turn = getOpponent(color);
+    // ゲーム続行。相手に合法手が無ければパスさせる
+    const opponent = getOpponent(color);
+    if (hasLegalAction(next, opponent)) {
+      next.turn = opponent;
+      next.passed = null;
+    } else if (hasLegalAction(next, color)) {
+      // 相手は打つ手が無いのでパス。手番は自分のまま continue
+      next.turn = color;
+      next.passed = opponent;
+    } else {
+      // 双方とも打つ手が無い場合は引き分けで終局
+      next.status = 'finished';
+      next.winner = null;
+      next.result = 'draw';
+      next.passed = null;
+    }
   }
 
   // 最後の手を記録
@@ -504,7 +568,7 @@ function applyAction(state, action) {
   return { ok: true, state: next };
 }
 
-module.exports = {
+export {
   BOARD_SIZE,
   MAX_PIECES,
   getCellType,
@@ -515,4 +579,5 @@ module.exports = {
   applyAction,
   evaluateOutcome,
   getOpponent,
+  hasLegalAction,
 };

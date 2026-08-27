@@ -12,8 +12,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiGet, apiPost } from '../api'
-import { getSocket } from '../socket'
-import { useAuth } from '../App'
+import { getLobbySocket } from '../socket'
+import { useAuth } from '../auth'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -40,8 +40,15 @@ export default function LobbyPage() {
   /** エラーメッセージ */
   const [error, setError] = useState('')
 
-  /** ニックネーム入力値 */
-  const [nickname, setNickname] = useState(user?.nickname || '')
+  /**
+   * ニックネーム入力値の下書き。
+   * null の間は user.nickname をそのまま表示するので、
+   * user が更新されても effect で同期する必要がない。
+   */
+  const [nicknameDraft, setNicknameDraft] = useState(null)
+
+  /** 実際に入力欄へ表示する値 */
+  const nickname = nicknameDraft ?? (user?.nickname || '')
 
   /** ニックネーム保存エラー */
   const [nicknameError, setNicknameError] = useState('')
@@ -87,13 +94,6 @@ export default function LobbyPage() {
   }
 
   // -------------------------------------------------------------------------
-  // Effect: ユーザー情報変更時にニックネーム入力を同期
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    setNickname(user?.nickname || '')
-  }, [user])
-
-  // -------------------------------------------------------------------------
   // Effect: ルーム一覧の取得とリアルタイム更新
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -118,7 +118,7 @@ export default function LobbyPage() {
       })
 
     // Socket.ioでルーム更新をリッスン
-    const socket = getSocket()
+    const socket = getLobbySocket()
     const handleRooms = (nextRooms) => {
       setRooms(nextRooms)
     }
@@ -147,6 +147,8 @@ export default function LobbyPage() {
     try {
       const data = await apiPost('/api/me/nickname', { nickname })
       setUser(data.user)
+      // 保存後は下書きを破棄し、サーバーから返った値を表示する
+      setNicknameDraft(null)
       setNicknameNotice('保存しました。')
     } catch (err) {
       if (err?.payload?.error === 'nickname_too_long') {
@@ -222,7 +224,7 @@ export default function LobbyPage() {
                      className="bg-background"
                      value={nickname}
                      maxLength={20}
-                     onChange={(e) => setNickname(e.target.value)}
+                     onChange={(e) => setNicknameDraft(e.target.value)}
                      placeholder="ニックネームを入力"
                    />
                    <Button type="submit">保存</Button>
