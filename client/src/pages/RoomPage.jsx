@@ -234,7 +234,8 @@ export default function RoomPage() {
   }, [numericRoomId])
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // block:'nearest' にしないと親（main）まで巻き込んでスクロールすることがある
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [chat])
 
   const handleSeat = (color) => {
@@ -451,109 +452,119 @@ export default function RoomPage() {
   }
 
   return (
-    <div className="flex-1 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
-          <p className="text-sm text-muted-foreground">観戦: {presence}人</p>
+    <div className="flex flex-col gap-3 lg:h-full lg:min-h-0">
+      <div className="flex shrink-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h2 className="truncate text-xl font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
+          <p className="shrink-0 text-xs text-muted-foreground">観戦: {presence}人</p>
         </div>
-        <Button variant="outline" onClick={() => navigate('/lobby')}>
+        <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
           ロビーへ戻る
         </Button>
       </div>
 
-      {error && <div className="rounded-md bg-destructive/10 p-3 text-sm font-medium text-destructive">{error}</div>}
-      {notice && <div className="rounded-md bg-primary/10 p-3 text-sm font-medium text-primary border border-primary/20">{notice}</div>}
+      {error && <div className="shrink-0 rounded-md bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">{error}</div>}
+      {notice && <div className="shrink-0 rounded-md border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">{notice}</div>}
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        <Card className="flex flex-col">
-          <CardHeader className="pb-4">
-            <div className="flex flex-wrap gap-2 text-xs">
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+      <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <Card className="flex flex-col lg:min-h-0 lg:overflow-hidden">
+          <CardHeader className="shrink-0 p-3">
+            <div className="flex flex-wrap gap-1.5 text-[11px]">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 状態: {statusLabel(room?.status || 'waiting')}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 あなた: {mySeatText}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 対局: {gameStatusLabel(game?.status || 'waiting')}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 手番: {turnLabel}
               </div>
               {game?.status === 'playing' && game?.passed && (
-                <div className="inline-flex items-center rounded-md bg-secondary/15 px-2 py-1 font-medium text-secondary">
+                <div className="inline-flex items-center rounded-md bg-secondary/15 px-2 py-0.5 font-medium text-secondary">
                   {seatLabel(game.passed)}は打つ手がないためパス
                 </div>
               )}
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 準備: 黒 {ready.black ? '●' : '○'} / 白 {ready.white ? '●' : '○'}
               </div>
-              <div className="inline-flex items-center rounded-md bg-muted px-2 py-1 font-medium">
+              <div className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-medium">
                 持ち駒: 黒 {Math.max(0, 6 - (placed.black || 0))} / 白 {Math.max(0, 6 - (placed.white || 0))}
               </div>
             </div>
           </CardHeader>
-          <CardContent className="flex flex-col items-center gap-4">
-            {resultLabel && <div className="w-full rounded-md bg-primary/10 p-3 text-center text-sm font-medium text-primary border border-primary/20">{resultLabel}</div>}
-            
-            <div className="relative w-full max-w-[500px] rounded-2xl border-4 border-border bg-white p-4 shadow-lg">
-              <img className="w-full h-auto block opacity-60" src="/board.svg" alt="盤面" />
-              <div className="absolute inset-4 grid grid-cols-5 grid-rows-5 p-[3.2%]">
-                {board.map((row, rowIndex) =>
-                  row.map((cell, colIndex) => {
-                    const key = `${rowIndex}-${colIndex}`
-                    const isSelected = selected?.row === rowIndex && selected?.col === colIndex
-                    const isMoveable = moveTargets.has(`${rowIndex},${colIndex}`)
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        className={cn(
-                          "flex items-center justify-center rounded-full transition-colors relative",
-                          "hover:bg-primary/10",
-                          isSelected && "shadow-[0_0_0_2px] shadow-secondary bg-secondary/10",
-                          isMoveable && "bg-primary/15"
-                        )}
-                        onClick={() => handleCellClick(rowIndex, colIndex)}
-                        aria-label={`セル ${rowIndex + 1}-${colIndex + 1}`}
-                      >
-                        {cell && (
-                          <span className={cn(
-                            "w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
-                            cell === 'black' ? "bg-gray-900 border border-gray-800" : "bg-gray-100 border border-gray-300"
-                          )} />
-                        )}
-                        {isMoveable && !cell && (
-                          <span className="w-3 h-3 rounded-full bg-primary opacity-50" />
-                        )}
-                      </button>
-                    )
-                  })
-                )}
+          <CardContent className="flex flex-col items-center gap-2 p-3 pt-0 lg:min-h-0 lg:flex-1">
+            {resultLabel && (
+              <div className="w-full shrink-0 rounded-md border border-primary/20 bg-primary/10 px-3 py-1.5 text-center text-xs font-medium text-primary">
+                {resultLabel}
+              </div>
+            )}
+
+            {/*
+              盤面は「残っている高さ」と「横幅」の狭いほうに合わせて縮む。
+              lg 以上では親を container-type:size にして 100cqh を使えるようにし、
+              min(100cqw, 100cqh) で常に正方形のまま収める。
+              lg 未満（スマホ・縦置き）は従来どおり横幅基準で、ページ側にスクロールを許す。
+            */}
+            <div className="flex w-full items-center justify-center lg:min-h-0 lg:flex-1 lg:[container-type:size]">
+              <div className="relative mx-auto aspect-square w-full max-w-[500px] rounded-2xl border-4 border-border bg-white p-3 shadow-lg lg:w-[min(100cqw,100cqh)] lg:max-w-[600px]">
+                <img className="block h-full w-full opacity-60" src="/board.svg" alt="盤面" />
+                <div className="absolute inset-3 grid grid-cols-5 grid-rows-5 p-[3.2%]">
+                  {board.map((row, rowIndex) =>
+                    row.map((cell, colIndex) => {
+                      const key = `${rowIndex}-${colIndex}`
+                      const isSelected = selected?.row === rowIndex && selected?.col === colIndex
+                      const isMoveable = moveTargets.has(`${rowIndex},${colIndex}`)
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          className={cn(
+                            "flex items-center justify-center rounded-full transition-colors relative",
+                            "hover:bg-primary/10",
+                            isSelected && "shadow-[0_0_0_2px] shadow-secondary bg-secondary/10",
+                            isMoveable && "bg-primary/15"
+                          )}
+                          onClick={() => handleCellClick(rowIndex, colIndex)}
+                          aria-label={`セル ${rowIndex + 1}-${colIndex + 1}`}
+                        >
+                          {cell && (
+                            <span className={cn(
+                              "w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
+                              cell === 'black' ? "bg-gray-900 border border-gray-800" : "bg-gray-100 border border-gray-300"
+                            )} />
+                          )}
+                          {isMoveable && !cell && (
+                            <span className="w-[18%] aspect-square rounded-full bg-primary opacity-50" />
+                          )}
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
               </div>
             </div>
-            
-            <p className="text-xs text-center text-muted-foreground bg-muted rounded-md px-3 py-2">
+
+            <p className="shrink-0 text-center text-[11px] text-muted-foreground">
               両者が開始を押すと対局開始。空きマスクリックで配置、駒を選択して移動。
             </p>
           </CardContent>
         </Card>
 
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">着席</CardTitle>
+        <div className="flex flex-col gap-3 lg:min-h-0">
+          <Card className="shrink-0">
+            <CardHeader className="p-3 pb-2">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">着席</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="rounded-lg border bg-card p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block h-3 w-3 rounded-full bg-gray-900 border border-gray-700" />
-                    <span className="text-sm font-medium text-primary">黒席</span>
-                  </div>
+            <CardContent className="space-y-2 p-3 pt-0">
+              <div className="space-y-1.5 rounded-lg border bg-card p-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full bg-gray-900 border border-gray-700" />
+                  <span className="text-sm font-medium text-primary">黒席</span>
                 </div>
-                <div className="font-mono text-sm font-semibold">{displayName(room?.seats.black)}</div>
+                <div className="truncate font-mono text-sm font-semibold">{displayName(room?.seats.black)}</div>
                 {mySeat === 'black' ? (
                   <div className="flex gap-2">
                     <Button variant="outline" size="sm" className="flex-1" onClick={() => handleSeatLeave('black')}>
@@ -582,14 +593,12 @@ export default function RoomPage() {
                 ) : null}
               </div>
 
-              <div className="rounded-lg border bg-card p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block h-3 w-3 rounded-full bg-white border border-gray-300" />
-                    <span className="text-sm font-medium text-primary">白席</span>
-                  </div>
+              <div className="space-y-1.5 rounded-lg border bg-card p-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full bg-white border border-gray-300" />
+                  <span className="text-sm font-medium text-primary">白席</span>
                 </div>
-                <div className="font-mono text-sm font-semibold">{displayName(room?.seats.white)}</div>
+                <div className="truncate font-mono text-sm font-semibold">{displayName(room?.seats.white)}</div>
                 {mySeat === 'white' ? (
                   <div className="flex gap-2">
                     <Button variant="outline" size="sm" className="flex-1" onClick={() => handleSeatLeave('white')}>
@@ -621,36 +630,36 @@ export default function RoomPage() {
           </Card>
 
           {cpuError && (
-            <div className="rounded-md bg-destructive/10 p-3 text-sm font-medium text-destructive">
+            <div className="shrink-0 rounded-md bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
               {cpuError}
             </div>
           )}
 
-          <Card className="flex flex-col h-[400px]">
-            <CardHeader className="pb-3 border-b">
-              <CardTitle className="text-base">ルームチャット</CardTitle>
-              <p className="text-xs text-muted-foreground">最終発言から30分で履歴がクリアされます。</p>
+          <Card className="flex h-[320px] flex-col overflow-hidden lg:h-auto lg:min-h-0 lg:flex-1">
+            <CardHeader className="shrink-0 border-b p-3">
+              <CardTitle className="text-sm">ルームチャット</CardTitle>
+              <p className="text-[11px] text-muted-foreground">最終発言から30分で履歴がクリアされます。</p>
             </CardHeader>
-            <CardContent className="flex-1 flex flex-col p-4 min-h-0">
-              <div className="flex-1 overflow-y-auto space-y-3 pr-2 min-h-0">
+            <CardContent className="flex min-h-0 flex-1 flex-col p-3">
+              <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
                 {chat.length === 0 ? (
-                  <div className="text-sm text-muted-foreground text-center py-4">まだメッセージはありません。</div>
+                  <div className="py-4 text-center text-sm text-muted-foreground">まだメッセージはありません。</div>
                 ) : (
                   chat.map((entry) => (
-                    <div key={entry.id} className="rounded-lg bg-muted/40 p-2.5">
-                      <div className="flex justify-between items-center mb-1 text-xs text-muted-foreground">
-                        <span className="font-mono font-semibold text-primary">
+                    <div key={entry.id} className="rounded-lg bg-muted/40 p-2">
+                      <div className="mb-0.5 flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span className="truncate font-mono font-semibold text-primary">
                           {entry.nickname || '名無しプレイヤー'}
                         </span>
-                        <span>{new Date(entry.created_at).toLocaleTimeString('ja-JP')}</span>
+                        <span className="shrink-0 pl-2">{new Date(entry.created_at).toLocaleTimeString('ja-JP')}</span>
                       </div>
-                      <div className="text-sm">{entry.message}</div>
+                      <div className="break-words text-sm">{entry.message}</div>
                     </div>
                   ))
                 )}
                 <div ref={chatEndRef} />
               </div>
-              <form onSubmit={handleSend} className="flex gap-2 mt-3 pt-3 border-t">
+              <form onSubmit={handleSend} className="mt-2 flex shrink-0 gap-2 border-t pt-2">
                 <Input
                   type="text"
                   value={message}
