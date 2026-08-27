@@ -334,46 +334,117 @@ function evaluateState(state, color) {
 }
 
 /**
- * ゲーム状態を文字列にシリアライズします。
- * トランスポジションテーブルのキーとして使用。
+ * 盤面をトランスポジションテーブル用のキーに変換します。
+ *
+ * 以前は board.map().join() で文字列を組み立てていたが、探索ノードごとに
+ * 中間配列と文字列を作るため、そこが探索の主なコストになっていた。
+ * 1マス2ビット・25マスで50ビットに収め、Number として扱う。
+ * （53ビットまでは倍精度で正確に整数を表せる）
+ *
  * @param {Object} state - シリアライズするゲーム状態
- * @returns {string} シリアライズされた文字列
+ * @returns {string} キー文字列
  */
 function serializeState(state) {
-  // 盤面を文字列化
-  const rows = state.board
-    .map((row) =>
-      row
-        .map((cell) => {
-          if (cell === "black") return "b";
-          if (cell === "white") return "w";
-          return "_";
-        })
-        .join("")
-    )
-    .join("/");
+  const board = state.board;
+  let code = 0;
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    const line = board[row];
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      const cell = line[col];
+      // 空き=0 / 黒=1 / 白=2
+      const bits = cell === null ? 0 : cell === "black" ? 1 : 2;
+      code = code * 4 + bits;
+    }
+  }
+  // 手番と持ち駒の消費数もキーに含める（同じ盤面でも合法手が変わるため）
+  return `${code.toString(36)}.${state.turn === "black" ? 0 : 1}${state.placed.black}${state.placed.white}`;
+}
 
-  return `${state.turn}|${state.placed.black}|${state.placed.white}|${rows}`;
+/** トランスポジションテーブルの評価値の種類 */
+const TT_EXACT = 0;
+const TT_LOWER = 1;
+const TT_UPPER = 2;
+
+/**
+ * 手の並べ替え用のスコアを付けます。
+ *
+ * アルファベータ枝刈りは「良い手を先に調べる」ほど枝を切れるため、
+ * 探索の深さは並べ替えの質でほぼ決まる。applyAction は重いので、
+ * 着手先の周囲を見るだけの軽い推定に留める。
+ *
+ * @param {Object} state - 現在の状態
+ * @param {Object} action - 評価する手
+ * @param {'black'|'white'} color - 手番の色
+ * @returns {number} スコア（大きいほど先に調べる）
+ */
+function orderingScore(state, action, color) {
+  const to = action.to;
+  const board = state.board;
+  const opponent = getOpponent(color);
+  let score = 0;
+
+  // 相手の駒に隣接する手は挟み（裏返し）につながりやすい
+  for (let i = 0; i < DIRECTIONS.length; i += 1) {
+    const row = to.row + DIRECTIONS[i][0];
+    const col = to.col + DIRECTIONS[i][1];
+    if (!inBounds(row, col)) {
+      continue;
+    }
+    const cell = board[row][col];
+    if (cell === opponent) {
+      score += 4;
+    } else if (cell === color) {
+      score += 1;
+    }
+  }
+
+  // 自分の色のマスは斜めスライドの起点になるので価値が高い
+  if (getCellType(to.row, to.col) === color) {
+    score += 2;
+  }
+
+  // 中央寄りを優先
+  score += 2 - (Math.abs(to.row - 2) + Math.abs(to.col - 2)) / 2;
+
+  return score;
 }
 
 /**
- * ミニマックス法（アルファベータ枝刈り）で最善手を探索します。
- * 反復深化により、制限時間内で可能な限り深く探索します。
+ * 根の手を評価順に並べて返します。
+ *
+ * 分割探索では毎回このリストの index で再開するので、
+ * 同じ局面なら必ず同じ順序になる必要がある（乱数を使わない）。
  *
  * @param {Object} state - 現在のゲーム状態
- * @param {'black'|'white'} color - CPUプレイヤーの色
- * @param {Object} [options={}] - 探索オプション
- * @param {number} [options.maxDepth=4] - 最大探索深度
- * @param {number} [options.timeLimitMs=400] - 制限時間（ミリ秒）
- * @returns {Object|null} 最善手（見つからない場合はnull）
+ * @param {'black'|'white'} color - 手番の色
+ * @returns {Array<Object>} 並べ替え済みのアクション配列
  */
-function searchBestMove(state, color, options = {}) {
-  const maxDepth = options.maxDepth || 4;
-  const timeLimitMs = options.timeLimitMs || 400;
-  const deadline = Date.now() + timeLimitMs;
+function listRootActions(state, color) {
+  const actions = listActions(state, color);
+  return actions
+    .map((action, index) => ({ action, index, score: orderingScore(state, action, color) }))
+    // 同点時は元の順序を保って安定させる
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.action);
+}
 
-  // トランスポジションテーブル（同一局面のキャッシュ）
+/**
+ * アルファベータ探索の本体を作ります。
+ *
+ * 探索量の制御に時間ではなくノード数を使う理由:
+ * Cloudflare Workers では Date.now() が「最後のI/Oの時刻」を返し、
+ * 同期処理の途中では進まない（サイドチャネル対策）。そのため
+ * 経過時間による打ち切りはWorkers上では一切機能しない。
+ * ノード数なら決定的に効くうえ、CPU時間ともほぼ比例する。
+ *
+ * @param {'black'|'white'} color - CPUプレイヤーの色（最大化する側）
+ * @param {number} nodeBudget - 探索するノード数の上限
+ * @returns {{evaluate: Function, nodes: Function, aborted: Function}} 探索コンテキスト
+ */
+function createSearchContext(color, nodeBudget) {
   const table = new Map();
+  let nodes = 0;
+  let aborted = false;
 
   /**
    * 再帰的に局面を評価します（ミニマックス法）
@@ -381,119 +452,297 @@ function searchBestMove(state, color, options = {}) {
    * @param {number} depth - 残り探索深度
    * @param {number} alpha - アルファ値（最大化側の下限）
    * @param {number} beta - ベータ値（最小化側の上限）
-   * @param {boolean} [isRoot=false] - 探索の根ノードかどうか
    * @returns {Object} 評価結果
    */
-  const evaluateAtDepth = (current, depth, alpha, beta, isRoot = false) => {
-    // 時間切れチェック
-    if (Date.now() > deadline) {
-      return { score: evaluateState(current, color), timedOut: true };
+  const evaluate = (current, depth, alpha, beta) => {
+    nodes += 1;
+    if (nodes > nodeBudget) {
+      aborted = true;
+      return { score: 0, aborted: true };
     }
 
-    // 深度0または終了状態なら評価して返す
     if (depth === 0 || current.status === "finished") {
-      return { score: evaluateState(current, color), timedOut: false };
+      return { score: evaluateState(current, color), aborted: false };
     }
 
-    // トランスポジションテーブルをチェック
-    const cacheKey = `${serializeState(current)}|d${depth}`;
-    const cached = table.get(cacheKey);
+    const alphaOrigin = alpha;
+    const key = serializeState(current);
+    const cached = table.get(key);
+
     if (cached && cached.depth >= depth) {
-      return { score: cached.score, timedOut: false, bestAction: cached.bestAction };
+      if (cached.flag === TT_EXACT) {
+        return { score: cached.score, aborted: false, bestAction: cached.action };
+      }
+      if (cached.flag === TT_LOWER && cached.score > alpha) {
+        alpha = cached.score;
+      } else if (cached.flag === TT_UPPER && cached.score < beta) {
+        beta = cached.score;
+      }
+      if (alpha >= beta) {
+        return { score: cached.score, aborted: false, bestAction: cached.action };
+      }
     }
 
-    // 可能なアクションを列挙
     const actions = listActions(current, current.turn);
     if (actions.length === 0) {
-      return { score: evaluateState(current, color), timedOut: false };
+      return { score: evaluateState(current, color), aborted: false };
     }
 
-    // CPUの手番なら最大化、相手の手番なら最小化
+    // 良さそうな手から調べるほど枝を切れる。浅い探索で得た手があれば最優先。
+    //
+    // 並べ替えは depth>=2 のときだけ行う。葉の直前(depth==1)では子がすべて
+    // 評価関数の呼び出しで終わるため、並べ替えの費用のほうが高くつく。
+    const hint = cached ? cached.action : null;
+    if (actions.length > 1 && depth >= 2) {
+      const turnColor = current.turn;
+      // スコアは1手につき1回だけ計算する。
+      // 比較関数の中で計算すると O(n log n) 回呼ばれてしまう。
+      const scores = new Array(actions.length);
+      for (let i = 0; i < actions.length; i += 1) {
+        scores[i] = hint && sameAction(actions[i], hint)
+          ? Number.POSITIVE_INFINITY
+          : orderingScore(current, actions[i], turnColor);
+      }
+      // 挿入ソート。手の数はせいぜい数十なので、配列を作り直すより速い。
+      for (let i = 1; i < actions.length; i += 1) {
+        const action = actions[i];
+        const score = scores[i];
+        let j = i - 1;
+        while (j >= 0 && scores[j] < score) {
+          actions[j + 1] = actions[j];
+          scores[j + 1] = scores[j];
+          j -= 1;
+        }
+        actions[j + 1] = action;
+        scores[j + 1] = score;
+      }
+    }
+
     const maximizing = current.turn === color;
     let bestScore = maximizing ? -Infinity : Infinity;
     let bestAction = null;
-    // 根ノードで同点の手が複数あった場合にランダムで選ぶためのカウンタ
-    // （毎回まったく同じ棋譜になるのを防ぐ）
-    let tieCount = 0;
 
-    // 各アクションを試行
     for (const action of actions) {
       const result = applyAction(current, action);
       if (!result.ok) {
         continue;
       }
 
-      const next = result.state;
-      const child = evaluateAtDepth(next, depth - 1, alpha, beta);
-
-      // 時間切れなら中断
-      if (child.timedOut) {
-        return { score: 0, timedOut: true };
+      const child = evaluate(result.state, depth - 1, alpha, beta);
+      if (child.aborted) {
+        return { score: 0, aborted: true };
       }
 
       if (maximizing) {
-        // 最大化ノード
         if (child.score > bestScore) {
           bestScore = child.score;
           bestAction = action;
-          tieCount = 1;
-        } else if (isRoot && child.score === bestScore) {
-          // 同点の手はリザーバサンプリングで等確率に選ぶ
-          tieCount += 1;
-          if (Math.random() * tieCount < 1) {
-            bestAction = action;
-          }
         }
-        alpha = Math.max(alpha, bestScore);
-        // ベータカット
+        if (bestScore > alpha) {
+          alpha = bestScore;
+        }
         if (alpha >= beta) {
           break;
         }
       } else {
-        // 最小化ノード
         if (child.score < bestScore) {
           bestScore = child.score;
           bestAction = action;
         }
-        beta = Math.min(beta, bestScore);
-        // アルファカット
+        if (bestScore < beta) {
+          beta = bestScore;
+        }
         if (beta <= alpha) {
           break;
         }
       }
     }
 
-    // 結果をキャッシュ
-    table.set(cacheKey, { score: bestScore, depth, bestAction });
-    return { score: bestScore, timedOut: false, bestAction };
+    if (bestAction === null) {
+      return { score: evaluateState(current, color), aborted: false };
+    }
+
+    const flag =
+      bestScore <= alphaOrigin ? TT_UPPER : bestScore >= beta ? TT_LOWER : TT_EXACT;
+    table.set(key, { depth, score: bestScore, flag, action: bestAction });
+
+    return { score: bestScore, aborted: false, bestAction };
   };
 
-  // 反復深化: 深度1から徐々に深く探索
-  let best = null;
-  for (let depth = 1; depth <= maxDepth; depth += 1) {
-    const result = evaluateAtDepth(state, depth, -Infinity, Infinity, true);
+  return {
+    evaluate,
+    nodes: () => nodes,
+    aborted: () => aborted,
+  };
+}
 
-    // 時間切れなら前回の結果を使用
-    if (result.timedOut) {
+/**
+ * 根の手を index から順に評価します。ノード数の予算を使い切ったら中断し、
+ * 次に再開すべき index を返します。
+ *
+ * 1回のリクエストで使えるCPU時間は無料プランで10msしかないため、
+ * 深い探索は複数のアラームに分割して進める。分割しても各リクエストの
+ * CPU時間は予算で頭打ちになる。
+ *
+ * @param {Object} state - 現在のゲーム状態
+ * @param {'black'|'white'} color - CPUプレイヤーの色
+ * @param {Object} options - オプション
+ * @param {number} options.depth - 探索深度
+ * @param {number} [options.startIndex=0] - 再開する根の手のindex
+ * @param {number} [options.nodeBudget=1200] - このバッチで使えるノード数
+ * @param {number} [options.bestScore=-Infinity] - ここまでの最善評価値
+ * @param {Object} [options.bestAction=null] - ここまでの最善手
+ * @returns {Object} 進捗と最善手
+ */
+function searchRootBatch(state, color, options) {
+  const depth = options.depth;
+  const startIndex = options.startIndex || 0;
+  const nodeBudget = options.nodeBudget || 1200;
+
+  const actions = listRootActions(state, color);
+  const total = actions.length;
+  if (total === 0) {
+    return { done: true, nextIndex: 0, total: 0, bestScore: -Infinity, bestAction: null, nodes: 0 };
+  }
+
+  const context = createSearchContext(color, nodeBudget);
+  let bestScore = typeof options.bestScore === "number" ? options.bestScore : -Infinity;
+  let bestAction = options.bestAction || null;
+  let index = startIndex;
+  let evaluated = 0;
+
+  while (index < total) {
+    const action = actions[index];
+    const result = applyAction(state, action);
+
+    if (!result.ok) {
+      index += 1;
+      continue;
+    }
+
+    // これまでの最善値をアルファに使う（根は最大化なので有効）
+    const child = context.evaluate(result.state, depth - 1, bestScore, Infinity);
+
+    if (child.aborted) {
+      // 予算切れ。この手はまだ評価できていないので次のティックで調べ直す。
+      //
+      // ただし1手も評価できないまま終わると永久に進まないので、その場合だけは
+      // 浅い深さで評価し直して必ず1手ぶん進める。
+      if (evaluated > 0) {
+        break;
+      }
+      const shallow = createSearchContext(color, nodeBudget);
+      const retry = shallow.evaluate(result.state, 1, -Infinity, Infinity);
+      if (!retry.aborted && (retry.score > bestScore || bestAction === null)) {
+        bestScore = retry.score;
+        bestAction = action;
+      }
+      index += 1;
+      evaluated += 1;
       break;
     }
 
-    if (result.bestAction) {
-      best = result.bestAction;
+    if (child.score > bestScore || bestAction === null) {
+      bestScore = child.score;
+      bestAction = action;
+    }
+
+    index += 1;
+    evaluated += 1;
+
+    if (context.nodes() >= nodeBudget) {
+      break;
     }
   }
 
-  // 最善手が見つかった場合は返す
+  return {
+    done: index >= total,
+    nextIndex: index,
+    total,
+    bestScore,
+    bestAction,
+    nodes: context.nodes(),
+  };
+}
+
+/**
+ * ミニマックス法（アルファベータ枝刈り）で最善手を探索します。
+ * 反復深化により、ノード数の予算内で可能な限り深く探索します。
+ *
+ * 1リクエストで完結させたい場面（浅い保険の探索など）で使います。
+ * 深い探索は searchRootBatch で分割してください。
+ *
+ * @param {Object} state - 現在のゲーム状態
+ * @param {'black'|'white'} color - CPUプレイヤーの色
+ * @param {Object} [options={}] - 探索オプション
+ * @param {number} [options.maxDepth=4] - 最大探索深度
+ * @param {number} [options.nodeBudget=1200] - 探索するノード数の上限
+ * @param {Object} [options.stats] - 探索結果の統計を書き戻すオブジェクト（任意）
+ * @returns {Object|null} 最善手（見つからない場合はnull）
+ */
+function searchBestMove(state, color, options = {}) {
+  const maxDepth = options.maxDepth || 4;
+  const nodeBudget = options.nodeBudget || 1200;
+
+  let best = null;
+  let reachedDepth = 0;
+  let nodes = 0;
+
+  // 反復深化: 深度1から徐々に深く探索
+  for (let depth = 1; depth <= maxDepth; depth += 1) {
+    const remaining = nodeBudget - nodes;
+    if (remaining <= 0) {
+      break;
+    }
+
+    const result = searchRootBatch(state, color, { depth, nodeBudget: remaining });
+    nodes += result.nodes;
+
+    if (result.bestAction) {
+      best = result.bestAction;
+      if (result.done) {
+        reachedDepth = depth;
+      }
+    }
+
+    if (!result.done) {
+      break;
+    }
+  }
+
+  if (options.stats) {
+    options.stats.nodes = nodes;
+    options.stats.depth = reachedDepth;
+  }
+
   if (best) {
     return best;
   }
 
-  // フォールバック: 最初の有効なアクションを返す
   const fallback = listActions(state, color);
   if (fallback.length === 0) {
     return null;
   }
   return fallback[Math.floor(Math.random() * fallback.length)];
+}
+
+/**
+ * 2つのアクションが同じ手かどうかを判定します。
+ * @param {Object} a - アクションA
+ * @param {Object} b - アクションB
+ * @returns {boolean} 同じ手ならtrue
+ */
+function sameAction(a, b) {
+  if (!a || !b || a.type !== b.type) {
+    return false;
+  }
+  if (a.to.row !== b.to.row || a.to.col !== b.to.col) {
+    return false;
+  }
+  if (a.type === "move") {
+    return a.from.row === b.from.row && a.from.col === b.from.col;
+  }
+  return true;
 }
 
 // =============================================================================
@@ -503,52 +752,63 @@ function searchBestMove(state, color, options = {}) {
 /**
  * CPUの難易度ごとの探索設定。
  *
- * Cloudflare Workers の無料プランは 1リクエストあたり CPU 10ms のため、
- * ここの既定値のままでは超過します。実際に使う値は resolveCpuLevel() が
- * 環境変数 CPU_MAX_DEPTH / CPU_TIME_LIMIT_MS で上書きします。
+ * depth      … 読む手数
+ * nodeBudget … 1リクエストあたりに探索するノード数の上限
+ * maxTicks   … 1手の思考に使うアラームの回数
  *
- * @type {Object<string, {maxDepth: number, timeLimitMs: number}>}
+ * 無料プランは 1リクエストあたり CPU 10ms なので、深く読むには
+ * 探索を複数のアラームに分割するしかない。nodeBudget が1回あたりの
+ * CPU時間を、maxTicks が1手にかける総量を決める。
+ *
+ * @type {Object<string, {depth: number, nodeBudget: number, maxTicks: number}>}
  */
 const CPU_LEVELS = {
-  easy: { maxDepth: 2, timeLimitMs: 120 },
-  normal: { maxDepth: 3, timeLimitMs: 240 },
-  hard: { maxDepth: 4, timeLimitMs: 420 },
-  strong: { maxDepth: 5, timeLimitMs: 700 },
+  easy: { depth: 2, nodeBudget: 600, maxTicks: 1 },
+  normal: { depth: 3, nodeBudget: 800, maxTicks: 2 },
+  hard: { depth: 3, nodeBudget: 1000, maxTicks: 3 },
+  strong: { depth: 3, nodeBudget: 1000, maxTicks: 4 },
 };
 
 /**
  * 難易度名と環境変数から、実際に使う探索設定を決定します。
  *
- * CPU_MAX_DEPTH / CPU_TIME_LIMIT_MS が設定されている場合は上限として作用し、
- * 難易度ごとの値がそれを超えないよう切り詰めます。
- * （無料プランでは小さい値、有料プランに切り替えたら大きい値を設定する）
+ * CPU_MAX_DEPTH / CPU_NODE_BUDGET / CPU_MAX_TICKS が設定されている場合は
+ * 上限として作用し、難易度ごとの値がそれを超えないよう切り詰めます。
  *
  * @param {string} levelName - 難易度名（easy/normal/hard/strong）
  * @param {Object} [env={}] - Workers の環境変数
- * @returns {{level: string, maxDepth: number, timeLimitMs: number}} 探索設定
+ * @returns {{level: string, depth: number, nodeBudget: number, maxTicks: number}} 探索設定
  */
 function resolveCpuLevel(levelName, env = {}) {
   const level = CPU_LEVELS[levelName] ? levelName : "strong";
   const base = CPU_LEVELS[level];
 
-  const depthCap = Number(env.CPU_MAX_DEPTH);
-  const timeCap = Number(env.CPU_TIME_LIMIT_MS);
+  /**
+   * 環境変数を上限として適用します。
+   * @param {number} value - 難易度ごとの値
+   * @param {*} raw - 環境変数の値
+   * @returns {number} 適用後の値
+   */
+  const cap = (value, raw) => {
+    const limit = Number(raw);
+    return Number.isFinite(limit) && limit > 0 ? Math.min(value, limit) : value;
+  };
 
   return {
     level,
-    maxDepth: Number.isFinite(depthCap) && depthCap > 0
-      ? Math.min(base.maxDepth, depthCap)
-      : base.maxDepth,
-    timeLimitMs: Number.isFinite(timeCap) && timeCap > 0
-      ? Math.min(base.timeLimitMs, timeCap)
-      : base.timeLimitMs,
+    depth: cap(base.depth, env.CPU_MAX_DEPTH),
+    nodeBudget: cap(base.nodeBudget, env.CPU_NODE_BUDGET),
+    maxTicks: cap(base.maxTicks, env.CPU_MAX_TICKS),
   };
 }
 
 export {
+  serializeState as positionKey,
   listActions,
+  listRootActions,
   evaluateState,
   searchBestMove,
+  searchRootBatch,
   CPU_LEVELS,
   resolveCpuLevel,
 };
