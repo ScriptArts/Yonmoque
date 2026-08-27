@@ -187,7 +187,7 @@ export default function LobbyPage() {
                 {/* 入室。カード全体がボタンなので、ここは見た目だけのチップ */}
                 <div className="mt-auto flex items-center justify-between gap-2 pt-4">
                   <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                    観戦 {room.presence}
+                    入室 {room.presence}
                   </span>
                   <span className="inline-flex h-7 items-center rounded-sm border border-primary/60 px-3 text-xs font-semibold text-primary transition-colors group-hover:border-primary group-hover:bg-primary group-hover:text-primary-foreground">
                     入室
