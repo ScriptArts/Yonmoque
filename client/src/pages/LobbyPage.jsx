@@ -326,7 +326,6 @@ export default function LobbyPage() {
             <CardFooter className="mt-auto pt-4">
               <Button
                 className="w-full"
-                variant={room.presence > 0 ? "default" : "secondary"}
                 onClick={() => navigate(`/room/${room.id}`)}
               >
                 入室
