@@ -458,9 +458,24 @@ export default function RoomPage() {
           <h2 className="truncate text-lg font-bold tracking-tight">{room ? room.name : 'ルーム'}</h2>
           <p className="shrink-0 text-xs text-muted-foreground">観戦: {presence}人</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
-          ロビーへ戻る
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {/*
+            対局中に同じタブで遷移すると WebSocket が切れて不戦敗になるため、
+            必ず別タブで開く。
+          */}
+          <Button variant="outline" size="sm" asChild>
+            <a
+              href="https://www.logygames.com/yonmoque/j-rule.html"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ルール
+            </a>
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
+            ロビーへ戻る
+          </Button>
+        </div>
       </div>
 
       {error && <div className="shrink-0 rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-xs font-medium text-destructive">{error}</div>}
@@ -521,23 +536,32 @@ export default function RoomPage() {
                         <button
                           key={key}
                           type="button"
-                          className={cn(
-                            "flex items-center justify-center rounded-full transition-colors relative",
-                            "hover:bg-primary/10",
-                            isSelected && "shadow-[0_0_0_2px] shadow-secondary bg-secondary/10",
-                            isMoveable && "bg-primary/15"
-                          )}
+                          className="group/cell relative flex items-center justify-center"
                           onClick={() => handleCellClick(rowIndex, colIndex)}
                           aria-label={`セル ${rowIndex + 1}-${colIndex + 1}`}
                         >
+                          {/*
+                            ハイライトはボタン自体ではなく駒と同じ 70% の円に描く。
+                            ボタンを塗るとマス全体が円になり、盤に描かれた枠から
+                            はみ出して見えるため。
+                          */}
+                          <span
+                            className={cn(
+                              "pointer-events-none absolute h-[70%] w-[70%] rounded-full transition-colors",
+                              isSelected
+                                ? "bg-secondary/15 ring-2 ring-secondary"
+                                : "group-hover/cell:bg-primary/10"
+                            )}
+                          />
                           {cell && (
                             <span className={cn(
-                              "w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
+                              "relative w-[70%] aspect-square rounded-full shadow-[inset_2px_2px_4px_rgba(255,255,255,0.4),inset_-2px_-2px_4px_rgba(0,0,0,0.2),0_2px_4px_rgba(0,0,0,0.2)]",
                               cell === 'black' ? "bg-gray-900 border border-gray-800" : "bg-gray-100 border border-gray-300"
                             )} />
                           )}
+                          {/* 移動先の目印。塗り円ではなく小さな点にして盤面を汚さない */}
                           {isMoveable && !cell && (
-                            <span className="w-[18%] aspect-square rounded-full bg-primary opacity-50" />
+                            <span className="pointer-events-none relative w-[22%] aspect-square rounded-full bg-primary/70" />
                           )}
                         </button>
                       )
@@ -549,6 +573,15 @@ export default function RoomPage() {
 
             <p className="shrink-0 text-center text-[11px] text-muted-foreground">
               両者が開始を押すと対局開始。空きマスクリックで配置、駒を選択して移動。
+              {' '}
+              <a
+                href="https://www.logygames.com/yonmoque/j-rule.html"
+                target="_blank"
+                rel="noreferrer"
+                className="underline decoration-border underline-offset-2 hover:text-foreground hover:decoration-foreground"
+              >
+                ルール
+              </a>
             </p>
           </CardContent>
         </Card>
