@@ -1,0 +1,57 @@
+# main にマージ（push）されたら Cloudflare Workers へ自動デプロイする。
+#
+# 事前準備（1回だけ）:
+#   1. Cloudflare ダッシュボードで API トークンを発行
+#      https://dash.cloudflare.com/profile/api-tokens
+#      テンプレート「Edit Cloudflare Workers」を使うのが手軽
+#   2. リポジトリに Secrets を登録
+#      gh secret set CLOUDFLARE_API_TOKEN
+#      gh secret set CLOUDFLARE_ACCOUNT_ID --body 44cebf56382a78893598a77e5476e023
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  # 手動でも流せるようにしておく（デプロイのやり直し用）
+  workflow_dispatch:
+
+# 同時に複数のデプロイが走らないようにする。
+# cancel-in-progress は false。デプロイ途中で止めると中途半端な状態になりうるため。
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            worker/package-lock.json
+
+      - name: 依存関係のインストール
+        run: |
+          npm --prefix client ci
+          npm --prefix worker ci
+
+      - name: Lint
+        run: npm --prefix client run lint
+
+      - name: クライアントのビルド
+        run: npm --prefix client run build
+
+      # wrangler.jsonc の assets.directory が ../client/dist を指しているため、
+      # 上のビルド成果物がそのまま同一オリジンで配信される。
+      - name: Cloudflare へデプロイ
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
