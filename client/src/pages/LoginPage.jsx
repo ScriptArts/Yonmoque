@@ -14,7 +14,6 @@ import { apiPost } from '../api'
 import { useAuth } from '../auth'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@radix-ui/react-label"
 
 /**
@@ -142,179 +141,175 @@ export default function LoginPage() {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex min-h-[80vh] items-center justify-center p-4">
-      <div className="grid w-full max-w-5xl gap-8 lg:grid-cols-2">
+    <div className="mx-auto flex min-h-full w-full max-w-5xl items-center py-6">
+      <div className="grid w-full gap-10 lg:grid-cols-[1fr_360px] lg:gap-14">
 
-        {/* ===== 左側: ゲーム説明カード ===== */}
-        <Card className={`flex flex-col ${!isRegister ? 'justify-between' : 'self-start'} border-secondary/30 bg-secondary/5 shadow-none`}>
-          <CardHeader>
-            <div className="flex items-center gap-4">
-              {/* ゲームアイコン */}
-              <img
-                className="h-16 w-16 rounded-xl border bg-white object-cover shadow-sm"
-                src="/icon.png"
-                alt="ヨンモク ロゴ"
-              />
-              <div>
-                <CardTitle className="text-3xl font-bold text-secondary">ヨンモク</CardTitle>
-                {/* 制作者リンク */}
-                <a
-                  className="mt-2 flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-secondary"
-                  href="https://www.scriptarts.jp/"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <img
-                    className="h-5 w-5 rounded object-cover"
-                    src="/scriptarts-logo.png"
-                    alt="ScriptArts ロゴ"
-                  />
-                  <span>WEB制作: ScriptArts</span>
-                </a>
-              </div>
-            </div>
-          </CardHeader>
+        {/* ===== 左: ゲームの紹介 =====
+            囲いを持たせず地の上に直接置く。囲いがあるのは右のフォームだけにして、
+            「操作する場所」を1箇所に絞る。 */}
+        <div className="max-w-prose">
+          <div className="flex items-center gap-3">
+            <img
+              className="h-11 w-11 rounded-sm border bg-card object-cover"
+              src="/icon.png"
+              alt="ヨンモク ロゴ"
+            />
+            <h1 className="text-3xl font-bold tracking-tight text-secondary">ヨンモク</h1>
+          </div>
 
-          {/* ゲーム説明文 */}
-          <CardContent className="grid gap-4 text-sm leading-relaxed text-foreground/80">
-            <div className="rounded-lg bg-white/60 p-4 shadow-sm backdrop-blur-sm">
-              <p className="mb-2">
-                ヨンモクゲームは、1996年に logygames 様が考案した、2人対戦のボードゲームです。
-                各プレイヤーは6個の持ち駒を使い、盤上に打ったり移動させたりしながら、
-                縦・横・斜めのいずれかの方向に4目を先に並べた方が勝利となります。
-                ただし、5目並べてしまうと負けになる点には注意が必要です。
-              </p>
-              <p>
-                また、移動させた駒で相手の駒を挟むと、オセロのように相手の駒をひっくり返し、
-                自分の色の駒にすることができます。
-              </p>
-            </div>
-          </CardContent>
+          <div className="mt-6 space-y-3 border-t pt-6 text-sm leading-relaxed text-foreground/80">
+            <p>
+              ヨンモクゲームは、1996年に logygames 様が考案した、2人対戦のボードゲームです。
+              各プレイヤーは6個の持ち駒を使い、盤上に打ったり移動させたりしながら、
+              縦・横・斜めのいずれかの方向に4目を先に並べた方が勝利となります。
+              ただし、5目並べてしまうと負けになる点には注意が必要です。
+            </p>
+            <p>
+              また、移動させた駒で相手の駒を挟むと、オセロのように相手の駒をひっくり返し、
+              自分の色の駒にすることができます。
+            </p>
+          </div>
 
-          {/* 外部リンクボタン */}
-          <CardFooter className="flex flex-col items-start gap-4">
-            <div className="flex flex-wrap gap-3">
-               <Button className="bg-secondary text-white hover:bg-secondary/80" asChild>
-                <a href="https://www.logygames.com/yonmoque/" target="_blank" rel="noreferrer">
-                  公式サイト
-                </a>
-               </Button>
-               <Button className="bg-secondary text-white hover:bg-secondary/80" asChild>
-                <a href="https://www.logygames.com/yonmoque/j-rule.html" target="_blank" rel="noreferrer">
-                  ルール説明
-                </a>
-               </Button>
-            </div>
-            {/* 原作クレジット */}
-            <p className="text-xs text-muted-foreground">
+          {/* 外部リンク。ボタンで塗らず、文字のリンクとして並べる */}
+          <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+            <a
+              className="underline decoration-border underline-offset-4 hover:decoration-foreground"
+              href="https://www.logygames.com/yonmoque/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              公式サイト
+            </a>
+            <a
+              className="underline decoration-border underline-offset-4 hover:decoration-foreground"
+              href="https://www.logygames.com/yonmoque/j-rule.html"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ルール説明
+            </a>
+          </div>
+
+          {/* クレジット */}
+          <div className="mt-8 space-y-1.5 border-t pt-4 text-xs text-muted-foreground">
+            <p>
               ※ ヨンモクゲームの原作は{' '}
               <a
                 href="https://www.logygames.com/yonmoque/"
                 target="_blank"
                 rel="noreferrer"
-                className="underline hover:text-secondary"
+                className="underline decoration-border underline-offset-2 hover:decoration-foreground"
               >
                 logygames
               </a>
               {' '}様に帰属します。
             </p>
-          </CardFooter>
-        </Card>
+            <a
+              className="inline-flex items-center gap-1.5 hover:text-foreground"
+              href="https://www.scriptarts.jp/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <img className="h-4 w-4 rounded-[2px] object-cover" src="/scriptarts-logo.png" alt="" />
+              <span>WEB制作: ScriptArts</span>
+            </a>
+          </div>
+        </div>
 
-        {/* ===== 右側: ログイン/登録フォームカード ===== */}
-        <Card className="border-2 border-primary/10 shadow-lg">
-          <CardHeader>
-            <CardTitle>{isRegister ? 'アカウント作成' : 'ログイン'}</CardTitle>
-            <CardDescription>
-              {isRegister
-                ? '必要な情報を入力してアカウントを作成してください。'
-                : 'アカウント情報を入力してログインしてください。'}
-            </CardDescription>
-          </CardHeader>
+        {/* ===== 右: ログイン/登録フォーム ===== */}
+        <div className="rounded-sm border bg-card p-6 lg:self-start">
+          <h2 className="text-base font-bold tracking-tight">
+            {isRegister ? 'アカウント作成' : 'ログイン'}
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {isRegister
+              ? '必要な情報を入力してアカウントを作成してください。'
+              : 'アカウント情報を入力してログインしてください。'}
+          </p>
 
-          <CardContent>
-            <form onSubmit={submit} className="grid gap-4">
-              {/* ログインID入力 */}
-              <div className="grid gap-2">
-                <Label htmlFor="loginId" className="text-sm font-medium">ID（半角英数字）</Label>
+          <form onSubmit={submit} className="mt-5 grid gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="loginId" className="text-xs font-medium text-muted-foreground">
+                ID（半角英数字）
+              </Label>
+              <Input
+                id="loginId"
+                type="text"
+                value={loginId}
+                onChange={(event) => setLoginId(event.target.value)}
+                placeholder="ScriptArts"
+                required
+              />
+            </div>
+
+            {isRegister ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="nickname" className="text-xs font-medium text-muted-foreground">
+                  ニックネーム（任意）
+                </Label>
                 <Input
-                  id="loginId"
+                  id="nickname"
                   type="text"
-                  value={loginId}
-                  onChange={(event) => setLoginId(event.target.value)}
-                  placeholder="ScriptArts"
-                  required
+                  value={nickname}
+                  onChange={(event) => setNickname(event.target.value)}
+                  placeholder="名無しプレイヤー"
                 />
               </div>
+            ) : null}
 
-              {/* ニックネーム入力（登録時のみ） */}
-              {isRegister ? (
-                <div className="grid gap-2">
-                  <Label htmlFor="nickname" className="text-sm font-medium">ニックネーム（任意）</Label>
-                  <Input
-                    id="nickname"
-                    type="text"
-                    value={nickname}
-                    onChange={(event) => setNickname(event.target.value)}
-                    placeholder="名無しプレイヤー"
-                  />
-                </div>
-              ) : null}
+            <div className="grid gap-1.5">
+              <Label htmlFor="password" className="text-xs font-medium text-muted-foreground">
+                パスワード
+              </Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="••••••••"
+                required
+              />
+            </div>
 
-              {/* パスワード入力 */}
-              <div className="grid gap-2">
-                <Label htmlFor="password" className="text-sm font-medium">パスワード</Label>
+            {isRegister ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="confirmPassword" className="text-xs font-medium text-muted-foreground">
+                  パスワード（確認）
+                </Label>
                 <Input
-                  id="password"
+                  id="confirmPassword"
                   type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
                   placeholder="••••••••"
                   required
                 />
+                <p className="text-xs text-muted-foreground">パスワードは6文字以上で入力してください。</p>
               </div>
+            ) : null}
 
-              {/* パスワード確認入力（登録時のみ） */}
-              {isRegister ? (
-                <div className="grid gap-2">
-                  <Label htmlFor="confirmPassword" className="text-sm font-medium">パスワード（確認）</Label>
-                  <Input
-                    id="confirmPassword"
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(event) => setConfirmPassword(event.target.value)}
-                    placeholder="••••••••"
-                    required
-                  />
-                  <p className="text-xs text-muted-foreground">パスワードは6文字以上で入力してください。</p>
-                </div>
-              ) : null}
+            {error ? (
+              <div className="rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs font-medium text-destructive">
+                {error}
+              </div>
+            ) : null}
 
-              {/* エラーメッセージ表示 */}
-              {error ? (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm font-medium text-destructive">
-                  {error}
-                </div>
-              ) : null}
-
-              {/* 送信ボタン */}
-              <Button type="submit" disabled={loading} className="w-full">
-                {loading
-                  ? '処理中...'
-                  : isRegister
-                    ? 'アカウント作成'
-                    : 'ログイン'}
-              </Button>
-            </form>
-          </CardContent>
-
-          {/* モード切り替えリンク */}
-          <CardFooter className="flex justify-center border-t p-6">
-            <Button variant="link" onClick={handleModeToggle}>
-              {isRegister ? 'すでにアカウントをお持ちの方はこちら' : 'アカウントをお持ちでない方はこちら'}
+            {/* この画面で唯一シアンで塗る要素 */}
+            <Button type="submit" disabled={loading} className="mt-1 w-full">
+              {loading ? '処理中...' : isRegister ? 'アカウント作成' : 'ログイン'}
             </Button>
-          </CardFooter>
-        </Card>
+          </form>
+
+          <div className="mt-5 border-t pt-4 text-center">
+            <button
+              type="button"
+              onClick={handleModeToggle}
+              className="text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground"
+            >
+              {isRegister ? 'すでにアカウントをお持ちの方はこちら' : 'アカウントをお持ちでない方はこちら'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
