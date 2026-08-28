@@ -46,6 +46,35 @@ const BLACK_POSITIONS = new Set([
 ]);
 
 /**
+ * 隣接8方向の移動ベクトル。
+ * 呼び出しごとに配列を作り直すとCPU対戦の探索でそのコストが効いてくるため、
+ * モジュール定数として1度だけ確保する。
+ * @type {Array<Array<number>>}
+ */
+const ALL_DIRECTIONS = [
+  [1, 0],   // 下
+  [-1, 0],  // 上
+  [0, 1],   // 右
+  [0, -1],  // 左
+  [1, 1],   // 右下
+  [1, -1],  // 左下
+  [-1, 1],  // 右上
+  [-1, -1], // 左上
+];
+
+/**
+ * ライン判定に使う4方向（縦・横・斜め2種）。
+ * 逆向きは同じラインなので4方向で足りる。
+ * @type {Array<Array<number>>}
+ */
+const LINE_DIRECTIONS = [
+  [1, 0],   // 縦
+  [0, 1],   // 横
+  [1, 1],   // 右下斜め
+  [-1, 1],  // 左下斜め
+];
+
+/**
  * 座標が盤面内かどうかを判定します。
  * @param {number} row - 行番号（0-4）
  * @param {number} col - 列番号（0-4）
@@ -134,11 +163,14 @@ function normalizeState(state) {
   // 盤面を正規化
   const board = createEmptyBoard();
   if (Array.isArray(state.board)) {
+    // 5x5の範囲だけを走査し、想定外の行や値は捨てる
     for (let row = 0; row < BOARD_SIZE; row += 1) {
       const sourceRow = state.board[row];
+      // 行が配列でなければその行はすべて空きマスのままにする
       if (!Array.isArray(sourceRow)) {
         continue;
       }
+      // 行内の各マスを検証しながら書き写す
       for (let col = 0; col < BOARD_SIZE; col += 1) {
         const cell = sourceRow[col];
         // 有効な値のみコピー
@@ -153,13 +185,35 @@ function normalizeState(state) {
   const placed = state.placed || { black: 0, white: 0 };
   const ready = state.ready || { black: false, white: false };
 
+  // 配置済み駒数は数値以外を0に丸める
+  let placedBlack = 0;
+  if (Number.isFinite(placed.black)) {
+    placedBlack = placed.black;
+  }
+  let placedWhite = 0;
+  if (Number.isFinite(placed.white)) {
+    placedWhite = placed.white;
+  }
+
+  // 手番は 'white' 以外をすべて黒（先手）として扱う
+  let turn = 'black';
+  if (state.turn === 'white') {
+    turn = 'white';
+  }
+
+  // パスした色は既知の2色のみ受け付ける
+  let passed = null;
+  if (state.passed === 'black' || state.passed === 'white') {
+    passed = state.passed;
+  }
+
   return {
     board,
     placed: {
-      black: Number.isFinite(placed.black) ? placed.black : 0,
-      white: Number.isFinite(placed.white) ? placed.white : 0,
+      black: placedBlack,
+      white: placedWhite,
     },
-    turn: state.turn === 'white' ? 'white' : 'black',
+    turn,
     status: state.status || 'waiting',
     ready: {
       black: Boolean(ready.black),
@@ -168,7 +222,38 @@ function normalizeState(state) {
     winner: state.winner || null,
     result: state.result || null,
     lastMove: state.lastMove || null,
-    passed: state.passed === 'black' || state.passed === 'white' ? state.passed : null,
+    passed,
+  };
+}
+
+/**
+ * 正規化済みのゲーム状態を複製します。
+ *
+ * normalizeState は1マスずつ値を検証しながら盤面を作り直すため、
+ * 正しいことが分かっている状態のコピーには重すぎる。CPU対戦の探索では
+ * 1ノードごとにこのコピーが走るので、検証を省いた複製を使う。
+ *
+ * @param {Object} state - 正規化済みのゲーム状態
+ * @returns {Object} 複製された状態
+ */
+function cloneState(state) {
+  const source = state.board;
+  const board = new Array(BOARD_SIZE);
+  // 行ごとに浅いコピーを取れば、マスの値は文字列とnullなので複製として十分
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    board[row] = source[row].slice();
+  }
+
+  return {
+    board,
+    placed: { black: state.placed.black, white: state.placed.white },
+    turn: state.turn,
+    status: state.status,
+    ready: { black: state.ready.black, white: state.ready.white },
+    winner: state.winner,
+    result: state.result,
+    lastMove: state.lastMove,
+    passed: state.passed,
   };
 }
 
@@ -178,7 +263,11 @@ function normalizeState(state) {
  * @returns {'black'|'white'} 相手の色
  */
 function getOpponent(color) {
-  return color === 'black' ? 'white' : 'black';
+  // 黒の相手は白、それ以外（白）の相手は黒
+  if (color === 'black') {
+    return 'white';
+  }
+  return 'black';
 }
 
 /**
@@ -198,11 +287,7 @@ function hasLegalAction(state, color) {
   const placed = state.placed || { black: 0, white: 0 };
   const canPlace = (placed[color] || 0) < MAX_PIECES;
 
-  const stepDirections = [
-    [1, 0], [-1, 0], [0, 1], [0, -1],
-    [1, 1], [1, -1], [-1, 1], [-1, -1],
-  ];
-
+  // 盤面全体を走査し、合法手が1つ見つかった時点で打ち切る
   for (let row = 0; row < BOARD_SIZE; row += 1) {
     for (let col = 0; col < BOARD_SIZE; col += 1) {
       const cell = board[row][col];
@@ -214,7 +299,8 @@ function hasLegalAction(state, color) {
 
       // 自分の駒の隣に空きがあれば「動かす」が可能
       if (cell === color) {
-        for (const [dr, dc] of stepDirections) {
+        // 隣接8方向のうち1つでも空いていれば動かせる
+        for (const [dr, dc] of ALL_DIRECTIONS) {
           const nextRow = row + dr;
           const nextCol = col + dc;
           if (inBounds(nextRow, nextCol) && board[nextRow][nextCol] === null) {
@@ -290,6 +376,7 @@ function isValidDiagonalSlide(board, color, from, to) {
     if (i < distance && board[row][col] !== null) {
       return false;
     }
+
   }
 
   return true;
@@ -306,22 +393,10 @@ function isValidDiagonalSlide(board, color, from, to) {
  */
 function flipSandwiched(board, color, origin) {
   const opponent = getOpponent(color);
-
-  // 8方向をチェック
-  const directions = [
-    [1, 0],   // 下
-    [-1, 0],  // 上
-    [0, 1],   // 右
-    [0, -1],  // 左
-    [1, 1],   // 右下
-    [1, -1],  // 左下
-    [-1, 1],  // 右上
-    [-1, -1], // 左上
-  ];
-
   const flipped = [];
 
-  for (const [dr, dc] of directions) {
+  // 8方向それぞれについて、相手の駒を挟んでいるかを調べる
+  for (const [dr, dc] of ALL_DIRECTIONS) {
     const candidates = [];
     let row = origin.row + dr;
     let col = origin.col + dc;
@@ -335,7 +410,7 @@ function flipSandwiched(board, color, origin) {
 
     // 相手の駒の後に自分の駒があれば挟んでいる
     if (candidates.length > 0 && inBounds(row, col) && board[row][col] === color) {
-      // 挟まれた駒を反転
+      // 挟まれた駒をすべて自分の色に変える
       for (const [r, c] of candidates) {
         board[r][c] = color;
         flipped.push([r, c]);
@@ -347,59 +422,6 @@ function flipSandwiched(board, color, origin) {
 }
 
 /**
- * 指定色の最長ライン（連続した駒の数）を取得します。
- * 縦・横・斜めの4方向で最も長い連続を探します。
- * @param {Array<Array<string|null>>} board - 盤面
- * @param {'black'|'white'} color - チェックする色
- * @returns {number} 最長ラインの長さ
- */
-function getMaxLine(board, color) {
-  // 縦・横・斜め（右下、左下）の4方向
-  const directions = [
-    [1, 0],   // 縦
-    [0, 1],   // 横
-    [1, 1],   // 右下斜め
-    [-1, 1],  // 左下斜め
-  ];
-
-  let maxLength = 0;
-
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      // 指定色の駒でなければスキップ
-      if (board[row][col] !== color) {
-        continue;
-      }
-
-      for (const [dr, dc] of directions) {
-        // ラインの先頭からのみカウント（重複防止）
-        const prevRow = row - dr;
-        const prevCol = col - dc;
-        if (inBounds(prevRow, prevCol) && board[prevRow][prevCol] === color) {
-          continue;
-        }
-
-        // ラインの長さをカウント
-        let length = 0;
-        let r = row;
-        let c = col;
-        while (inBounds(r, c) && board[r][c] === color) {
-          length += 1;
-          r += dr;
-          c += dc;
-        }
-
-        if (length > maxLength) {
-          maxLength = length;
-        }
-      }
-    }
-  }
-
-  return maxLength;
-}
-
-/**
  * 指定したマスを通る、その色の最長ラインの長さを取得します。
  * 縦・横・斜めの4方向について、そのマスを含む連続の長さを両方向に数えます。
  * @param {Array<Array<string|null>>} board - 盤面
@@ -408,35 +430,39 @@ function getMaxLine(board, color) {
  * @returns {number} 最長ラインの長さ
  */
 function getMaxLineThrough(board, color, cells) {
-  // 縦・横・斜め（右下、左下）の4方向
-  const directions = [
-    [1, 0],   // 縦
-    [0, 1],   // 横
-    [1, 1],   // 右下斜め
-    [-1, 1],  // 左下斜め
-  ];
-
   let maxLength = 0;
 
+  // 変化したマスを1つずつ起点にして、そこを通るラインの長さを測る
   for (const [row, col] of cells) {
+    // 自分の色でないマスは起点にならないので読み飛ばす
     if (!inBounds(row, col) || board[row][col] !== color) {
       continue;
     }
 
-    for (const [dr, dc] of directions) {
-      // 対象マス自身を1として、両方向に伸ばす
+    // 縦・横・斜め2種の4方向について長さを数える
+    for (const [dr, dc] of LINE_DIRECTIONS) {
+      // 対象マス自身を1として、正方向と逆方向の両方に伸ばす
       let length = 1;
 
-      for (const sign of [1, -1]) {
-        let r = row + dr * sign;
-        let c = col + dc * sign;
-        while (inBounds(r, c) && board[r][c] === color) {
-          length += 1;
-          r += dr * sign;
-          c += dc * sign;
-        }
+      // 正方向へ、同じ色が続く限り数える
+      let r = row + dr;
+      let c = col + dc;
+      while (inBounds(r, c) && board[r][c] === color) {
+        length += 1;
+        r += dr;
+        c += dc;
       }
 
+      // 逆方向へも同様に数える
+      r = row - dr;
+      c = col - dc;
+      while (inBounds(r, c) && board[r][c] === color) {
+        length += 1;
+        r -= dr;
+        c -= dc;
+      }
+
+      // これまでで最も長いラインを保持する
       if (length > maxLength) {
         maxLength = length;
       }
@@ -448,34 +474,35 @@ function getMaxLineThrough(board, color, cells) {
 
 /**
  * 勝敗を評価します。
- * - 5目以上並ぶと負け（打つ・動かすのどちらでも即座に負け）
+ * - 5目以上並ぶと負け（打つ・動かすのどちらでも）
  * - 4目並ぶと勝ち。ただし「その手によって4目が成立した」場合のみ。
  *   駒を打って4目並べても勝ちにはならず、盤上に既にある4目は、
  *   別の駒を動かしても勝ちにはならない（そのラインを崩して組み直す必要がある）。
  *
- * 「その手で成立した4目」は、その手で自分の色になったマス
- * （移動先＋反転させたマス）を通るラインだけを見れば判定できる。
- * 駒が減った側のマスではラインは伸びないため。
+ * 4目・5目とも、その手で自分の色になったマス（移動先＋反転させたマス）を通る
+ * ラインだけを見れば足りる:
+ * - 4目は「その手で成立した」ものだけが勝ちなので、定義上そこしか見なくてよい
+ * - 5目は、直前の局面に5目が無いこと（あれば既に終局している）が前提なので、
+ *   新しく5目になり得るのは色が変わったマスを通るラインだけ。駒が減った側の
+ *   マスではラインは伸びない
  *
  * @param {Array<Array<string|null>>} board - 盤面
  * @param {'black'|'white'} color - 評価するプレイヤーの色
- * @param {Array<Array<number>>} [createdCells=null] - その手で自分の色になったマス。
- *   勝ちが成立しない手（駒を打つ）では null を渡す。
+ * @param {Array<Array<number>>} changedCells - その手で自分の色になったマス
+ * @param {boolean} canWin - 4目で勝てる手か（動かす手ならtrue、打つ手ならfalse）
  * @returns {Object} 評価結果
  * @returns {'win'|'lose'|null} return.result - 勝敗結果
- * @returns {number} return.maxLine - 最長ラインの長さ
+ * @returns {number} return.maxLine - 変わったマスを通る最長ラインの長さ
  */
-function evaluateOutcome(board, color, createdCells = null) {
-  const maxLine = getMaxLine(board, color);
+function evaluateOutcome(board, color, changedCells, canWin) {
+  const maxLine = getMaxLineThrough(board, color, changedCells);
 
   if (maxLine >= 5) {
     // 5目以上は負け
     return { result: 'lose', maxLine };
   }
-
-  // その手で色が変わったマスを通るラインが4目なら勝ち
-  if (createdCells && createdCells.length > 0
-      && getMaxLineThrough(board, color, createdCells) >= 4) {
+  if (maxLine >= 4 && canWin) {
+    // その手で4目が成立した（勝ち）
     return { result: 'win', maxLine };
   }
 
@@ -492,14 +519,25 @@ function evaluateOutcome(board, color, createdCells = null) {
  * @param {'black'|'white'} action.color - アクションを行うプレイヤーの色
  * @param {Object} [action.from] - 移動元座標（moveの場合のみ）
  * @param {Object} action.to - 移動先座標
+ * @param {Object} [options] - 動作オプション
+ * @param {boolean} [options.trusted=false] - 正規化済みの状態を渡していることが
+ *   保証されている場合にtrue。正規化と着手時刻の生成を省いて高速化する。
+ *   CPU対戦の探索専用で、外部入力を扱う経路では絶対に使わないこと。
  * @returns {Object} 結果オブジェクト
  * @returns {boolean} return.ok - 成功したかどうか
  * @returns {string} [return.error] - 失敗理由
  * @returns {Object} [return.state] - 成功時の新しいゲーム状態
  */
-function applyAction(state, action) {
-  // 状態を正規化してコピー
-  const next = normalizeState(state);
+function applyAction(state, action, options) {
+  const trusted = Boolean(options && options.trusted);
+
+  // 状態をコピー（信頼できない入力はここで正規化も行う）
+  let next;
+  if (trusted) {
+    next = cloneState(state);
+  } else {
+    next = normalizeState(state);
+  }
   const { type, color } = action;
 
   // ゲームが進行中でなければ拒否
@@ -521,6 +559,7 @@ function applyAction(state, action) {
   let to = null;
   let flipped = [];
 
+  // アクションの種類ごとに、盤面を更新する処理を分ける
   if (type === 'place') {
     // === 駒を打つ ===
     to = action.to;
@@ -582,11 +621,16 @@ function applyAction(state, action) {
     return { ok: false, error: 'invalid_action' };
   }
 
-  // 勝敗判定。4目の勝ちは「その手で4目が成立した」ときだけなので、
-  // その手で自分の色になったマス（移動先＋反転したマス）を渡す。
-  // 駒を打った場合は勝ちにならないため null を渡す。
-  const createdCells = type === 'move' ? [[to.row, to.col], ...flipped] : null;
-  const outcome = evaluateOutcome(next.board, color, createdCells);
+  // 勝敗判定。その手で自分の色になったマス（移動先＋反転したマス）を渡す。
+  // 4目の勝ちは動かす手のときだけ成立する。
+  const changedCells = [[to.row, to.col]];
+  // 反転したマスも「その手で自分の色になったマス」として判定対象に含める
+  for (const cell of flipped) {
+    changedCells.push(cell);
+  }
+  const outcome = evaluateOutcome(next.board, color, changedCells, type === 'move');
+
+  // 判定結果に応じて終局処理を行うか、手番を進める
   if (outcome.result === 'lose') {
     // 5目並べてしまった（負け）
     next.status = 'finished';
@@ -616,14 +660,20 @@ function applyAction(state, action) {
     }
   }
 
-  // 最後の手を記録
+  // 着手時刻の文字列化は探索では使わないうえ高価なので、trusted では省く。
+  let at = null;
+  if (!trusted) {
+    at = new Date().toISOString();
+  }
+
+  // 最後の手を記録する
   next.lastMove = {
     type,
     color,
     from,
     to,
     flipped,
-    at: new Date().toISOString(),
+    at,
   };
 
   return { ok: true, state: next };

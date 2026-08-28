@@ -30,8 +30,15 @@ const decoder = new TextDecoder();
  * @returns {string} Base64URL文字列
  */
 function toBase64Url(buffer) {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  // ArrayBuffer で渡された場合はバイト列に変換してから扱う
+  let bytes;
+  if (buffer instanceof Uint8Array) {
+    bytes = buffer;
+  } else {
+    bytes = new Uint8Array(buffer);
+  }
   let binary = "";
+  // btoa に渡せるよう、1バイトずつ文字へ変換して連結する
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
@@ -47,6 +54,7 @@ function fromBase64Url(value) {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
   const bytes = new Uint8Array(binary.length);
+  // 復号した文字列を1文字ずつバイトへ書き戻す
   for (let i = 0; i < binary.length; i += 1) {
     bytes[i] = binary.charCodeAt(i);
   }
@@ -60,10 +68,12 @@ function fromBase64Url(value) {
  * @returns {boolean} 一致すればtrue
  */
 function timingSafeEqual(a, b) {
+  // 長さが違う時点で不一致だが、この判定は内容を漏らさない
   if (a.length !== b.length) {
     return false;
   }
   let diff = 0;
+  // 途中で打ち切らずに全バイトを走査し、比較時間を入力に依存させない
   for (let i = 0; i < a.length; i += 1) {
     diff |= a[i] ^ b[i];
   }
@@ -82,6 +92,7 @@ function timingSafeEqual(a, b) {
  * @returns {Promise<Uint8Array>} 32バイトの導出鍵
  */
 async function deriveKey(password, salt, iterations) {
+  // 平文パスワードをPBKDF2の鍵素材として取り込む
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
     encoder.encode(password),
@@ -118,22 +129,26 @@ async function hashPassword(password, iterations = DEFAULT_ITERATIONS) {
  * @returns {Promise<boolean>} 一致すればtrue
  */
 async function verifyPassword(password, stored) {
+  // 保存値が文字列でなければ検証できない
   if (typeof stored !== "string") {
     return false;
   }
 
   const parts = stored.split("$");
+  // 想定の保存形式（pbkdf2$反復回数$salt$hash）でなければ不一致とする
   if (parts.length !== 4 || parts[0] !== "pbkdf2") {
     return false;
   }
 
   const iterations = Number(parts[1]);
+  // 反復回数が壊れている保存値は検証できない
   if (!Number.isFinite(iterations) || iterations <= 0) {
     return false;
   }
 
   const salt = fromBase64Url(parts[2]);
   const expected = fromBase64Url(parts[3]);
+  // 保存時と同じ条件で鍵を導出し直して突き合わせる
   const actual = await deriveKey(password, salt, iterations);
 
   return timingSafeEqual(actual, expected);
@@ -178,16 +193,19 @@ async function signSession(payload, secret) {
  * @returns {Promise<Object|null>} 有効ならペイロード、無効ならnull
  */
 async function verifySession(value, secret) {
+  // `<payload>.<signature>` の形でなければ検証できない
   if (typeof value !== "string" || !value.includes(".")) {
     return null;
   }
 
   const [body, signature] = value.split(".");
+  // 本体か署名が欠けている場合は無効とする
   if (!body || !signature) {
     return null;
   }
 
   const key = await importHmacKey(secret);
+  // 同じ鍵で署名し直し、改ざんされていないか確認する
   const expected = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
   if (!timingSafeEqual(fromBase64Url(signature), new Uint8Array(expected))) {
     return null;
@@ -195,12 +213,13 @@ async function verifySession(value, secret) {
 
   let payload;
   try {
+    // 署名が正しければ本体をJSONとして復元する
     payload = JSON.parse(decoder.decode(fromBase64Url(body)));
   } catch {
     return null;
   }
 
-  // 有効期限切れ
+  // 有効期限切れ、または期限が入っていないペイロードは無効とする
   if (!payload || typeof payload.exp !== "number" || payload.exp * 1000 < Date.now()) {
     return null;
   }
@@ -216,15 +235,19 @@ async function verifySession(value, secret) {
  */
 function readCookie(request, name) {
   const header = request.headers.get("Cookie");
+  // Cookieヘッダが無ければ探す対象が無い
   if (!header) {
     return null;
   }
 
+  // `名前=値` を「;」区切りで順に調べ、目的の名前を探す
   for (const part of header.split(";")) {
     const index = part.indexOf("=");
+    // 「=」を含まない断片はCookieとして解釈できないので読み飛ばす
     if (index === -1) {
       continue;
     }
+    // 名前が一致したらURLデコードした値を返す
     if (part.slice(0, index).trim() === name) {
       return decodeURIComponent(part.slice(index + 1).trim());
     }
@@ -241,12 +264,17 @@ function readCookie(request, name) {
  */
 async function getSessionUserId(request, secret) {
   const cookie = readCookie(request, SESSION_COOKIE);
+  // セッションCookieが無ければ未ログイン
   if (!cookie) {
     return null;
   }
 
+  // 署名と有効期限を検証したうえでユーザーIDを取り出す
   const payload = await verifySession(cookie, secret);
-  return payload && typeof payload.uid === "number" ? payload.uid : null;
+  if (payload && typeof payload.uid === "number") {
+    return payload.uid;
+  }
+  return null;
 }
 
 /**
@@ -270,6 +298,7 @@ async function createSessionCookie(userId, secret, secure = true) {
     "SameSite=Lax",
     `Max-Age=${SESSION_MAX_AGE}`,
   ];
+  // HTTPS配信時のみ Secure を付ける（ローカルのHTTP開発では付けない）
   if (secure) {
     attrs.push("Secure");
   }
@@ -283,6 +312,7 @@ async function createSessionCookie(userId, secret, secure = true) {
  */
 function clearSessionCookie(secure = true) {
   const attrs = [`${SESSION_COOKIE}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  // 発行時と属性を揃えないとCookieを削除できないため、同じ条件でSecureを付ける
   if (secure) {
     attrs.push("Secure");
   }

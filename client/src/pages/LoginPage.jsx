@@ -10,7 +10,7 @@
 
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiPost } from '../api'
+import { apiPost, errorCodeOf } from '../api'
 import { useAuth } from '../auth'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -65,7 +65,7 @@ export default function LoginPage() {
     event.preventDefault()
     setError('')
 
-    // 登録時のバリデーション
+    // 登録時のみ、送信前に入力内容を検証する
     if (isRegister) {
       // IDは半角英数字のみ
       if (!/^[a-zA-Z0-9]+$/.test(loginId)) {
@@ -92,18 +92,21 @@ export default function LoginPage() {
     setLoading(true)
 
     try {
-      // ログインまたは登録APIを呼び出し
-      const data = isRegister
-        ? await apiPost('/api/auth/register', { loginId, password, nickname })
-        : await apiPost('/api/auth/login', { loginId, password })
+      // モードに応じて登録APIとログインAPIを呼び分ける
+      let data
+      if (isRegister) {
+        data = await apiPost('/api/auth/register', { loginId, password, nickname })
+      } else {
+        data = await apiPost('/api/auth/login', { loginId, password })
+      }
 
       // 認証成功: ユーザー情報を保存してロビーへ
       setUser(data.user)
       navigate('/lobby')
     } catch (err) {
-      // エラーハンドリング
+      // 登録は原因ごとにメッセージを出し分け、ログインは一律のメッセージにする
       if (isRegister) {
-        const code = err?.payload?.error
+        const code = errorCodeOf(err)
         if (code === 'id_exists') {
           setError('このIDは既に登録されています。')
         } else if (code === 'password_too_short') {
@@ -121,6 +124,7 @@ export default function LoginPage() {
         )
       }
     } finally {
+      // 成否にかかわらず送信中フラグを解除する
       setLoading(false)
     }
   }
@@ -130,7 +134,12 @@ export default function LoginPage() {
    * エラーとパスワード入力をクリア
    */
   const handleModeToggle = () => {
-    setMode(isRegister ? 'login' : 'register')
+    // 現在のモードと逆のモードへ切り替える
+    if (isRegister) {
+      setMode('login')
+    } else {
+      setMode('register')
+    }
     setError('')
     setPassword('')
     setConfirmPassword('')
@@ -139,6 +148,72 @@ export default function LoginPage() {
   // -------------------------------------------------------------------------
   // レンダリング
   // -------------------------------------------------------------------------
+
+  // 見出し・説明文・モード切替リンクの文言をモードに応じて決める
+  let formTitle = 'ログイン'
+  let formDescription = 'アカウント情報を入力してログインしてください。'
+  let modeToggleLabel = 'アカウントをお持ちでない方はこちら'
+  if (isRegister) {
+    formTitle = 'アカウント作成'
+    formDescription = '必要な情報を入力してアカウントを作成してください。'
+    modeToggleLabel = 'すでにアカウントをお持ちの方はこちら'
+  }
+
+  // 送信ボタンは送信中のみ「処理中...」にし、それ以外は見出しと同じ文言にする
+  let submitLabel = formTitle
+  if (loading) {
+    submitLabel = '処理中...'
+  }
+
+  // ニックネーム欄は登録モードのときだけ表示する
+  let nicknameField = null
+  if (isRegister) {
+    nicknameField = (
+      <div className="grid gap-1.5">
+        <Label htmlFor="nickname" className="text-xs font-medium text-muted-foreground">
+          ニックネーム（任意）
+        </Label>
+        <Input
+          id="nickname"
+          type="text"
+          value={nickname}
+          onChange={(event) => setNickname(event.target.value)}
+          placeholder="名無しプレイヤー"
+        />
+      </div>
+    )
+  }
+
+  // パスワード確認欄も登録モードのときだけ表示する
+  let confirmPasswordField = null
+  if (isRegister) {
+    confirmPasswordField = (
+      <div className="grid gap-1.5">
+        <Label htmlFor="confirmPassword" className="text-xs font-medium text-muted-foreground">
+          パスワード（確認）
+        </Label>
+        <Input
+          id="confirmPassword"
+          type="password"
+          value={confirmPassword}
+          onChange={(event) => setConfirmPassword(event.target.value)}
+          placeholder="••••••••"
+          required
+        />
+        <p className="text-xs text-muted-foreground">パスワードは6文字以上で入力してください。</p>
+      </div>
+    )
+  }
+
+  // エラーが発生している場合のみ警告を表示する
+  let errorView = null
+  if (error) {
+    errorView = (
+      <div className="rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs font-medium text-destructive">
+        {error}
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto flex min-h-full w-full max-w-5xl items-center py-6">
@@ -220,12 +295,10 @@ export default function LoginPage() {
         {/* ===== 右: ログイン/登録フォーム ===== */}
         <div className="rounded-sm border bg-card p-6 lg:self-start">
           <h2 className="text-base font-bold tracking-tight">
-            {isRegister ? 'アカウント作成' : 'ログイン'}
+            {formTitle}
           </h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            {isRegister
-              ? '必要な情報を入力してアカウントを作成してください。'
-              : 'アカウント情報を入力してログインしてください。'}
+            {formDescription}
           </p>
 
           <form onSubmit={submit} className="mt-5 grid gap-4">
@@ -243,20 +316,7 @@ export default function LoginPage() {
               />
             </div>
 
-            {isRegister ? (
-              <div className="grid gap-1.5">
-                <Label htmlFor="nickname" className="text-xs font-medium text-muted-foreground">
-                  ニックネーム（任意）
-                </Label>
-                <Input
-                  id="nickname"
-                  type="text"
-                  value={nickname}
-                  onChange={(event) => setNickname(event.target.value)}
-                  placeholder="名無しプレイヤー"
-                />
-              </div>
-            ) : null}
+            {nicknameField}
 
             <div className="grid gap-1.5">
               <Label htmlFor="password" className="text-xs font-medium text-muted-foreground">
@@ -272,32 +332,13 @@ export default function LoginPage() {
               />
             </div>
 
-            {isRegister ? (
-              <div className="grid gap-1.5">
-                <Label htmlFor="confirmPassword" className="text-xs font-medium text-muted-foreground">
-                  パスワード（確認）
-                </Label>
-                <Input
-                  id="confirmPassword"
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                  placeholder="••••••••"
-                  required
-                />
-                <p className="text-xs text-muted-foreground">パスワードは6文字以上で入力してください。</p>
-              </div>
-            ) : null}
+            {confirmPasswordField}
 
-            {error ? (
-              <div className="rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs font-medium text-destructive">
-                {error}
-              </div>
-            ) : null}
+            {errorView}
 
             {/* この画面で唯一シアンで塗る要素 */}
             <Button type="submit" disabled={loading} className="mt-1 w-full">
-              {loading ? '処理中...' : isRegister ? 'アカウント作成' : 'ログイン'}
+              {submitLabel}
             </Button>
           </form>
 
@@ -307,7 +348,7 @@ export default function LoginPage() {
               onClick={handleModeToggle}
               className="text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground"
             >
-              {isRegister ? 'すでにアカウントをお持ちの方はこちら' : 'アカウントをお持ちでない方はこちら'}
+              {modeToggleLabel}
             </button>
           </div>
         </div>
