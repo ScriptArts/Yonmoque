@@ -101,11 +101,18 @@ async function updateUserNickname(db, userId, nickname) {
  * @returns {Promise<boolean>} 更新できたらtrue
  */
 async function updateUserPassword(db, userId, passwordHash) {
+  // 対象ユーザーのパスワードハッシュを更新する
   const result = await db
     .prepare(`UPDATE users SET password_hash = ? WHERE id = ?`)
     .bind(passwordHash, userId)
     .run();
-  return (result.meta?.changes ?? 0) > 0;
+
+  // 更新件数が取れない実行結果は0件として扱う
+  let changes = 0;
+  if (result.meta && typeof result.meta.changes === "number") {
+    changes = result.meta.changes;
+  }
+  return changes > 0;
 }
 
 export {

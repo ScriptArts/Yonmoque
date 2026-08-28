@@ -44,12 +44,17 @@ function encodeResponse(id, payload) {
  * @returns {Object|null} パースできたメッセージ、失敗時はnull
  */
 function decodeMessage(raw) {
+  // バイナリフレームはこのプロトコルでは使わないので受け付けない
   if (typeof raw !== "string") {
     return null;
   }
   try {
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
+    // メッセージはオブジェクトである必要があるため、それ以外はnullにする
+    if (parsed && typeof parsed === "object") {
+      return parsed;
+    }
+    return null;
   } catch {
     return null;
   }

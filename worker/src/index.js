@@ -57,10 +57,40 @@ function json(data, status = 200, headers = {}) {
 async function readJson(request) {
   try {
     const body = await request.json();
-    return body && typeof body === "object" ? body : {};
+    // 配列やプリミティブが送られてきた場合は空オブジェクトとして扱う
+    if (body && typeof body === "object") {
+      return body;
+    }
+    return {};
   } catch {
     return {};
   }
+}
+
+/**
+ * リクエストボディから文字列項目を取り出します（前後の空白は除去）。
+ * @param {*} value - ボディ中の値
+ * @returns {string} 文字列（文字列でなければ空文字）
+ */
+function readTrimmed(value) {
+  // 文字列以外が送られてきた場合は未入力として扱う
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
+}
+
+/**
+ * リクエストボディからパスワードを取り出します（空白も意味を持つため除去しない）。
+ * @param {*} value - ボディ中の値
+ * @returns {string} 文字列（文字列でなければ空文字）
+ */
+function readPassword(value) {
+  // 文字列以外が送られてきた場合は未入力として扱う
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value;
 }
 
 /**
@@ -79,7 +109,11 @@ function sessionSecret(env) {
  */
 function pbkdf2Iterations(env) {
   const value = Number(env.PBKDF2_ITERATIONS);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_ITERATIONS;
+  // 環境変数が未設定・不正な場合は既定の反復回数を使う
+  if (Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  return DEFAULT_ITERATIONS;
 }
 
 /**
@@ -98,7 +132,11 @@ function isSecure(url) {
  */
 function roomCount(env) {
   const count = Number(env.ROOM_COUNT);
-  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 12;
+  // 環境変数が未設定・不正な場合は既定の12ルームにする
+  if (Number.isFinite(count) && count > 0) {
+    return Math.floor(count);
+  }
+  return 12;
 }
 
 /**
@@ -127,7 +165,9 @@ function lobbyStub(env) {
  * @returns {Promise<Object|null>} ユーザーオブジェクト
  */
 async function currentUser(request, env) {
+  // セッションCookieからユーザーIDを取り出す
   const userId = await getSessionUserId(request, sessionSecret(env));
+  // 未ログイン、または署名が無効ならユーザーは特定できない
   if (userId === null) {
     return null;
   }
@@ -148,34 +188,47 @@ async function currentUser(request, env) {
 async function register(request, env, url) {
   const body = await readJson(request);
 
-  const loginId = typeof body.loginId === "string" ? body.loginId.trim() : "";
-  const password = typeof body.password === "string" ? body.password : "";
-  const nickname = typeof body.nickname === "string" ? body.nickname.trim() : "";
+  const loginId = readTrimmed(body.loginId);
+  const password = readPassword(body.password);
+  const nickname = readTrimmed(body.nickname);
 
+  // ID・パスワードは必須
   if (!loginId || !password) {
     return json({ error: "missing_fields" }, 400);
   }
+  // IDは半角英数字のみ
   if (!/^[a-zA-Z0-9]+$/.test(loginId)) {
     return json({ error: "invalid_id" }, 400);
   }
+  // IDは3〜20文字
   if (loginId.length < 3 || loginId.length > 20) {
     return json({ error: "invalid_id" }, 400);
   }
+  // パスワードは6文字以上
   if (password.length < 6) {
     return json({ error: "password_too_short" }, 400);
   }
+  // ニックネームは20文字以内
   if (nickname.length > 20) {
     return json({ error: "nickname_too_long" }, 400);
   }
 
+  // 同じIDが既に登録されていないか確認する
   if (await getUserByLoginId(env.DB, loginId)) {
     return json({ error: "id_exists" }, 409);
   }
 
+  // パスワードをハッシュ化して保存する（平文は残さない）
   const passwordHash = await hashPassword(password, pbkdf2Iterations(env));
-  const storedNickname = nickname.length === 0 ? null : nickname;
+
+  // 未入力のニックネームはNULLとして保存する
+  let storedNickname = null;
+  if (nickname.length > 0) {
+    storedNickname = nickname;
+  }
   const userId = await createUser(env.DB, loginId, passwordHash, storedNickname);
 
+  // 登録と同時にログイン状態にするためセッションCookieを発行する
   const cookie = await createSessionCookie(userId, sessionSecret(env), isSecure(url));
   return json({ user: { id: userId, loginId, nickname: storedNickname } }, 201, {
     "Set-Cookie": cookie,
@@ -192,18 +245,21 @@ async function register(request, env, url) {
 async function login(request, env, url) {
   const body = await readJson(request);
 
-  const loginId = typeof body.loginId === "string" ? body.loginId.trim() : "";
-  const password = typeof body.password === "string" ? body.password : "";
+  const loginId = readTrimmed(body.loginId);
+  const password = readPassword(body.password);
 
+  // ID・パスワードは必須
   if (!loginId || !password) {
     return json({ error: "missing_fields" }, 400);
   }
 
+  // ユーザーの存在とパスワードの一致を確認する（どちらが違うかは区別せず返す）
   const user = await getUserByLoginId(env.DB, loginId);
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     return json({ error: "invalid_credentials" }, 401);
   }
 
+  // 認証できたのでセッションCookieを発行する
   const cookie = await createSessionCookie(user.id, sessionSecret(env), isSecure(url));
   return json(
     { user: { id: user.id, loginId: user.loginId, nickname: user.nickname } },
@@ -225,17 +281,21 @@ async function login(request, env, url) {
  */
 async function updateNickname(request, env, user) {
   const body = await readJson(request);
-  const nickname = typeof body.nickname === "string" ? body.nickname.trim() : "";
+  const nickname = readTrimmed(body.nickname);
 
+  // ニックネームは20文字以内
   if (nickname.length > 20) {
     return json({ error: "nickname_too_long" }, 400);
   }
 
-  const updated = await updateUserNickname(
-    env.DB,
-    user.id,
-    nickname.length === 0 ? null : nickname
-  );
+  // 未入力のニックネームはNULLとして保存する
+  let storedNickname = null;
+  if (nickname.length > 0) {
+    storedNickname = nickname;
+  }
+
+  // ニックネームを更新し、更新後のユーザー情報を返す
+  const updated = await updateUserNickname(env.DB, user.id, storedNickname);
   return json({ user: updated });
 }
 
@@ -250,21 +310,26 @@ async function changePassword(request, env, user) {
   const body = await readJson(request);
   const { currentPassword, newPassword } = body;
 
+  // 現在・新規のパスワードはどちらも必須
   if (!currentPassword || !newPassword) {
     return json({ error: "missing_fields" }, 400);
   }
+  // 新しいパスワードは6文字以上
   if (typeof newPassword !== "string" || newPassword.length < 6) {
     return json({ error: "password_too_short" }, 400);
   }
 
+  // 現在のハッシュを取得する（セッションが有効でも削除済みの可能性がある）
   const stored = await getUserWithPasswordById(env.DB, user.id);
   if (!stored) {
     return json({ error: "unauthorized" }, 401);
   }
+  // なりすまし防止のため、現在のパスワードの一致を確認する
   if (!(await verifyPassword(currentPassword, stored.password_hash))) {
     return json({ error: "invalid_current_password" }, 400);
   }
 
+  // 新しいパスワードをハッシュ化して保存する
   const newHash = await hashPassword(newPassword, pbkdf2Iterations(env));
   await updateUserPassword(env.DB, user.id, newHash);
 
@@ -290,10 +355,12 @@ async function changePassword(request, env, user) {
  * @returns {Promise<Response>} レスポンス
  */
 async function handleWebSocket(request, env, url) {
+  // Upgrade ヘッダが無いリクエストはWebSocketとして扱えない
   if (request.headers.get("Upgrade") !== "websocket") {
     return new Response("expected websocket", { status: 426 });
   }
 
+  // Durable Object へ渡すユーザー情報をここで確定させる
   const user = await currentUser(request, env);
   if (!user) {
     return new Response("unauthorized", { status: 401 });
@@ -306,6 +373,7 @@ async function handleWebSocket(request, env, url) {
 
   // --- 対局ルーム ---
   const roomId = Number(url.searchParams.get("roomId"));
+  // 存在しないルーム番号への接続は受け付けない
   if (!Number.isInteger(roomId) || roomId < 1 || roomId > roomCount(env)) {
     return new Response("not_found", { status: 404 });
   }
@@ -315,10 +383,12 @@ async function handleWebSocket(request, env, url) {
     userId: String(user.id),
     loginId: user.loginId,
   });
+  // ニックネーム未設定のユーザーはクエリに含めない
   if (user.nickname) {
     params.set("nickname", user.nickname);
   }
 
+  // 認証済みの情報を添えて RoomDO へ接続を引き渡す
   return roomStub(env, roomId).fetch(`https://room/ws?${params}`, request);
 }
 
@@ -341,6 +411,7 @@ async function handleApi(request, env, url) {
   const method = request.method;
 
   // --- 認証不要 ---
+  // 経路ごとにメソッドとパスの組み合わせで振り分ける
   if (method === "POST" && path === "/api/auth/register") {
     return register(request, env, url);
   }
@@ -357,6 +428,7 @@ async function handleApi(request, env, url) {
     return json({ error: "unauthorized" }, 401);
   }
 
+  // ログイン中のユーザー情報を返す
   if (method === "GET" && path === "/api/me") {
     return json({ user });
   }
@@ -367,14 +439,17 @@ async function handleApi(request, env, url) {
     return changePassword(request, env, user);
   }
 
+  // ルーム一覧は LobbyDO が集約しているので取り次ぐ
   if (method === "GET" && path === "/api/rooms") {
     const response = await lobbyStub(env).fetch("https://lobby/rooms");
     return json(await response.json());
   }
 
+  // ルーム個別の状態は該当する RoomDO のスナップショットを取り次ぐ
   const detail = ROOM_DETAIL.exec(path);
   if (method === "GET" && detail) {
     const roomId = Number(detail[1]);
+    // 存在しないルーム番号は404にする
     if (roomId < 1 || roomId > roomCount(env)) {
       return json({ error: "not_found" }, 404);
     }
@@ -398,6 +473,7 @@ export default {
     const url = new URL(request.url);
 
     try {
+      // WebSocketとAPIだけを Worker で処理し、それ以外は静的アセットへ渡す
       if (url.pathname === "/ws") {
         return await handleWebSocket(request, env, url);
       }
