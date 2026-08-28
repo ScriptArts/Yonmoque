@@ -4,7 +4,7 @@
  * ヨンモクは5x5盤面で行う2人対戦ボードゲームです。
  * - 各プレイヤーは6個の持ち駒を使用
  * - 駒を打つか、盤上の駒を移動させる
- * - 4目並べると勝ち、5目並べると負け
+ * - 移動で4目を成立させると勝ち（打って4目並べても勝ちにはならない）、5目並べると負け
  * - 移動で相手の駒を挟むと反転（オセロ風）
  *
  * @module game
@@ -400,24 +400,82 @@ function getMaxLine(board, color) {
 }
 
 /**
+ * 指定したマスを通る、その色の最長ラインの長さを取得します。
+ * 縦・横・斜めの4方向について、そのマスを含む連続の長さを両方向に数えます。
+ * @param {Array<Array<string|null>>} board - 盤面
+ * @param {'black'|'white'} color - チェックする色
+ * @param {Array<Array<number>>} cells - 対象のマス [[row, col], ...]
+ * @returns {number} 最長ラインの長さ
+ */
+function getMaxLineThrough(board, color, cells) {
+  // 縦・横・斜め（右下、左下）の4方向
+  const directions = [
+    [1, 0],   // 縦
+    [0, 1],   // 横
+    [1, 1],   // 右下斜め
+    [-1, 1],  // 左下斜め
+  ];
+
+  let maxLength = 0;
+
+  for (const [row, col] of cells) {
+    if (!inBounds(row, col) || board[row][col] !== color) {
+      continue;
+    }
+
+    for (const [dr, dc] of directions) {
+      // 対象マス自身を1として、両方向に伸ばす
+      let length = 1;
+
+      for (const sign of [1, -1]) {
+        let r = row + dr * sign;
+        let c = col + dc * sign;
+        while (inBounds(r, c) && board[r][c] === color) {
+          length += 1;
+          r += dr * sign;
+          c += dc * sign;
+        }
+      }
+
+      if (length > maxLength) {
+        maxLength = length;
+      }
+    }
+  }
+
+  return maxLength;
+}
+
+/**
  * 勝敗を評価します。
- * - 5目以上並ぶと負け
- * - 4目並ぶと勝ち
+ * - 5目以上並ぶと負け（打つ・動かすのどちらでも即座に負け）
+ * - 4目並ぶと勝ち。ただし「その手によって4目が成立した」場合のみ。
+ *   駒を打って4目並べても勝ちにはならず、盤上に既にある4目は、
+ *   別の駒を動かしても勝ちにはならない（そのラインを崩して組み直す必要がある）。
+ *
+ * 「その手で成立した4目」は、その手で自分の色になったマス
+ * （移動先＋反転させたマス）を通るラインだけを見れば判定できる。
+ * 駒が減った側のマスではラインは伸びないため。
+ *
  * @param {Array<Array<string|null>>} board - 盤面
  * @param {'black'|'white'} color - 評価するプレイヤーの色
+ * @param {Array<Array<number>>} [createdCells=null] - その手で自分の色になったマス。
+ *   勝ちが成立しない手（駒を打つ）では null を渡す。
  * @returns {Object} 評価結果
  * @returns {'win'|'lose'|null} return.result - 勝敗結果
  * @returns {number} return.maxLine - 最長ラインの長さ
  */
-function evaluateOutcome(board, color) {
+function evaluateOutcome(board, color, createdCells = null) {
   const maxLine = getMaxLine(board, color);
 
   if (maxLine >= 5) {
     // 5目以上は負け
     return { result: 'lose', maxLine };
   }
-  if (maxLine >= 4) {
-    // 4目は勝ち
+
+  // その手で色が変わったマスを通るラインが4目なら勝ち
+  if (createdCells && createdCells.length > 0
+      && getMaxLineThrough(board, color, createdCells) >= 4) {
     return { result: 'win', maxLine };
   }
 
@@ -524,15 +582,18 @@ function applyAction(state, action) {
     return { ok: false, error: 'invalid_action' };
   }
 
-  // 勝敗判定
-  const outcome = evaluateOutcome(next.board, color);
+  // 勝敗判定。4目の勝ちは「その手で4目が成立した」ときだけなので、
+  // その手で自分の色になったマス（移動先＋反転したマス）を渡す。
+  // 駒を打った場合は勝ちにならないため null を渡す。
+  const createdCells = type === 'move' ? [[to.row, to.col], ...flipped] : null;
+  const outcome = evaluateOutcome(next.board, color, createdCells);
   if (outcome.result === 'lose') {
     // 5目並べてしまった（負け）
     next.status = 'finished';
     next.winner = getOpponent(color);
     next.result = 'five';
   } else if (outcome.result === 'win') {
-    // 4目並べた（勝ち）
+    // 移動で4目並べた（勝ち）
     next.status = 'finished';
     next.winner = color;
     next.result = 'four';
