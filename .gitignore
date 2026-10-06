@@ -3,3 +3,6 @@ client/dist/
 .wrangler/
 .env
 .DS_Store
+
+# CPU 制限の計測ログ（アクセス元 IP などを含む）
+tail.json
