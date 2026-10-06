@@ -2,7 +2,11 @@
  * @fileoverview CPU対戦用AIモジュール
  *
  * ミニマックス法（アルファベータ枝刈り）を使用して最善手を探索します。
- * 反復深化により、制限時間内で可能な限り深く探索します。
+ * 反復深化により、ノード数の予算内で可能な限り深く探索します。
+ *
+ * 探索は Durable Object のアラーム1回の中で最後まで行います。
+ * 無料プランでも Durable Object には 1リクエスト10ms の CPU 制限がかからないことを
+ * 実測で確かめてあります（docs/cloudflare-cpu-limit.md）。
  *
  * @module ai
  */
@@ -25,6 +29,12 @@ import {
  * @type {{trusted: boolean}}
  */
 const SEARCH_APPLY = { trusted: true };
+
+/**
+ * 勝敗が決まった局面の評価値。
+ * 終局していない局面の評価値はこれより十分小さいので、絶対値がこれ以上なら勝敗が読み切れている。
+ */
+const WIN_SCORE = 100000;
 
 /**
  * 8方向の移動ベクトル
@@ -55,6 +65,17 @@ const DIAG_DIRECTIONS = [
 ];
 
 /**
+ * ラインを数える4方向（縦・横・斜め2種）。逆向きは同じラインなので4方向で足りる。
+ * @type {Array<Array<number>>}
+ */
+const LINE_DIRECTIONS = [
+  [1, 0],   // 縦
+  [0, 1],   // 横
+  [1, 1],   // 右下斜め
+  [-1, 1],  // 左下斜め
+];
+
+/**
  * 座標が盤面内かどうかを判定します。
  * @param {number} row - 行番号
  * @param {number} col - 列番号
@@ -64,28 +85,101 @@ function inBounds(row, col) {
   return row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE;
 }
 
+// =============================================================================
+// 評価関数用の早見表
+// =============================================================================
+//
+// 評価関数は探索の末端で毎回呼ばれ、探索時間の半分以上を占めていた。
+// 盤面の形は固定なので、マスの並びや隣接関係は起動時に1度だけ求めておき、
+// 評価のたびに座標計算や配列の確保をしないようにする。
+// マスは「row * BOARD_SIZE + col」の通し番号で扱う。
+
+/** 盤面のマスの数 */
+const CELL_COUNT = BOARD_SIZE * BOARD_SIZE;
+
+/** 通し番号から行を引く表 */
+const CELL_ROW = new Int8Array(CELL_COUNT);
+
+/** 通し番号から列を引く表 */
+const CELL_COL = new Int8Array(CELL_COUNT);
+
+/**
+ * 各マスに隣接するマスの通し番号
+ * @type {Array<Int8Array>}
+ */
+const NEIGHBORS = [];
+
+// 全マスについて、行・列と隣接マスの一覧を作る
+for (let index = 0; index < CELL_COUNT; index += 1) {
+  const row = Math.floor(index / BOARD_SIZE);
+  const col = index % BOARD_SIZE;
+  CELL_ROW[index] = row;
+  CELL_COL[index] = col;
+
+  const list = [];
+  // 隣接8方向のうち盤面内のマスだけを集める
+  for (const [dr, dc] of DIRECTIONS) {
+    if (inBounds(row + dr, col + dc)) {
+      list.push((row + dr) * BOARD_SIZE + (col + dc));
+    }
+  }
+  NEIGHBORS.push(Int8Array.from(list));
+}
+
+/**
+ * 縦・横・斜め2種の、盤端から盤端までの列（通し番号の並び）。
+ * 連続した同色の駒（ライン）は、これらの列を端から順に見れば漏れなく数えられる。
+ * @type {Array<Int8Array>}
+ */
+const LINES = [];
+
+// 4方向それぞれについて、列の先頭になるマスから盤端まで伸ばして列を作る
+for (const [dr, dc] of LINE_DIRECTIONS) {
+  for (let row = 0; row < BOARD_SIZE; row += 1) {
+    for (let col = 0; col < BOARD_SIZE; col += 1) {
+      // 1つ手前が盤面内なら列の途中なので、ここからは作らない
+      if (inBounds(row - dr, col - dc)) {
+        continue;
+      }
+      const line = [];
+      let r = row;
+      let c = col;
+      // 盤端に達するまで同じ方向へ進む
+      while (inBounds(r, c)) {
+        line.push(r * BOARD_SIZE + c);
+        r += dr;
+        c += dc;
+      }
+      LINES.push(Int8Array.from(line));
+    }
+  }
+}
+
+/** 評価中に盤面を数値へ置き換えておく作業領域（空き=0 / 自分=1 / 相手=2） */
+const CELL_CODES = new Int8Array(CELL_COUNT);
+
+/** 自分のラインの長さごとの点数（添字がラインの長さ。5以上は5として扱う） */
+const MY_LINE_SCORES = [0, 10, 60, 420, 8000, 8000];
+
+/** 相手のラインの長さごとの点数（自分より少し重くして防御を優先させる） */
+const OPPONENT_LINE_SCORES = [0, 10, 70, 440, 8200, 8200];
+
+// =============================================================================
+// 合法手の列挙と局面評価
+// =============================================================================
+
 /**
  * 指定されたプレイヤーが実行可能なすべてのアクションを列挙します。
+ *
+ * 1マス移動の行き先は隣接8マス、斜めスライドの行き先は2マス以上先なので、
+ * 同じ手が2回列挙されることは無い（重複チェックは不要）。
+ *
  * @param {Object} state - 現在のゲーム状態
  * @param {'black'|'white'} color - アクションを実行するプレイヤーの色
  * @returns {Array<Object>} 実行可能なアクションの配列
  */
 function listActions(state, color) {
   const actions = [];
-  const used = new Set();  // 重複防止用
-
-  /**
-   * アクションを追加（重複チェック付き）
-   * @param {Object} action - 追加するアクション
-   * @param {string} key - 重複チェック用のキー
-   */
-  const addAction = (action, key) => {
-    // 同じ移動先へ複数の経路がある場合があるため、キーで重複を弾く
-    if (!used.has(key)) {
-      used.add(key);
-      actions.push(action);
-    }
-  };
 
   // === 駒を打つアクション ===
   // 持ち駒が残っている場合のみ
@@ -95,7 +189,7 @@ function listActions(state, color) {
       for (let col = 0; col < BOARD_SIZE; col += 1) {
         // 空きマスに配置可能
         if (state.board[row][col] === null) {
-          addAction({ type: "place", color, to: { row, col } }, `p-${row}-${col}`);
+          actions.push({ type: "place", color, to: { row, col } });
         }
       }
     }
@@ -126,10 +220,7 @@ function listActions(state, color) {
           continue;
         }
 
-        addAction(
-          { type: "move", color, from, to: { row: toRow, col: toCol } },
-          `m-${row}-${col}-${toRow}-${toCol}`
-        );
+        actions.push({ type: "move", color, from, to: { row: toRow, col: toCol } });
       }
 
       // --- 斜めスライド移動 ---
@@ -163,10 +254,7 @@ function listActions(state, color) {
 
           // 2マス以上の移動のみ有効（1マス移動は上で処理済み）
           if (step >= 2) {
-            addAction(
-              { type: "move", color, from, to: { row: toRow, col: toCol } },
-              `m-${row}-${col}-${toRow}-${toCol}`
-            );
+            actions.push({ type: "move", color, from, to: { row: toRow, col: toCol } });
           }
 
           step += 1;
@@ -179,132 +267,6 @@ function listActions(state, color) {
 }
 
 /**
- * 盤面上の指定色の駒数をカウントします。
- * @param {Array<Array<string|null>>} board - 盤面
- * @param {'black'|'white'} color - カウントする色
- * @returns {number} 駒の数
- */
-function countPieces(board, color) {
-  let total = 0;
-  // 盤面全体を走査して該当色のマスを数える
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      if (board[row][col] === color) {
-        total += 1;
-      }
-    }
-  }
-  return total;
-}
-
-/**
- * 指定色のラインの長さごとの数をカウントします。
- * 評価関数で使用し、4目リーチなどを検出します。
- * @param {Array<Array<string|null>>} board - 盤面
- * @param {'black'|'white'} color - カウントする色
- * @returns {Object} 長さごとのライン数 {1: n, 2: n, 3: n, 4: n, 5: n}
- */
-function lineCounts(board, color) {
-  const counts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-
-  // 縦・横・斜め（右下、左下）の4方向
-  const scanDirs = [
-    [1, 0],   // 縦
-    [0, 1],   // 横
-    [1, 1],   // 右下斜め
-    [-1, 1],  // 左下斜め
-  ];
-
-  // 盤面全体を走査し、各マスを起点にラインを数える
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      // 指定色の駒でなければスキップ
-      if (board[row][col] !== color) {
-        continue;
-      }
-
-      // 縦・横・斜め2種の4方向について、そのマスから伸びる長さを測る
-      for (const [dr, dc] of scanDirs) {
-        // ラインの先頭からのみカウント（重複防止）
-        const prevRow = row - dr;
-        const prevCol = col - dc;
-        if (inBounds(prevRow, prevCol) && board[prevRow][prevCol] === color) {
-          continue;
-        }
-
-        // ラインの長さを計測
-        let length = 0;
-        let r = row;
-        let c = col;
-        // 同じ色が続く限り進み、その長さを数える
-        while (inBounds(r, c) && board[r][c] === color) {
-          length += 1;
-          r += dr;
-          c += dc;
-        }
-
-        // 長さ5以上は5としてカウント
-        if (length >= 1) {
-          counts[Math.min(length, 5)] += 1;
-        }
-      }
-    }
-  }
-
-  return counts;
-}
-
-/**
- * 実行可能な手数の概算を返します。
- *
- * 正確な手数は listActions() で得られますが、末端評価から毎回呼ぶには重いため、
- * 「自分の駒に隣接する空きマスの数」＋「持ち駒が残っていれば空きマスの数」で近似します。
- * 斜めスライドは数えませんが、評価は差分でしか使わないため実用上問題ありません。
- *
- * @param {Object} state - ゲーム状態
- * @param {'black'|'white'} color - 対象プレイヤーの色
- * @returns {number} 手数の概算
- */
-function countMobility(state, color) {
-  const board = state.board;
-  let mobility = 0;
-  let emptyCells = 0;
-
-  // 盤面全体を走査し、空きマス数と自分の駒から動ける先の数を数える
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      const cell = board[row][col];
-
-      // 空きマスは「打つ」手の候補になるので別に数える
-      if (cell === null) {
-        emptyCells += 1;
-        continue;
-      }
-      // 相手の駒はここでは数えない
-      if (cell !== color) {
-        continue;
-      }
-
-      // 自分の駒の隣接8方向のうち、空いている数だけ動ける先がある
-      for (const [dr, dc] of DIRECTIONS) {
-        const nextRow = row + dr;
-        const nextCol = col + dc;
-        if (inBounds(nextRow, nextCol) && board[nextRow][nextCol] === null) {
-          mobility += 1;
-        }
-      }
-    }
-  }
-
-  // 持ち駒が残っていれば空きマスすべてが「打つ」手になる
-  if ((state.placed[color] || 0) < MAX_PIECES) {
-    mobility += emptyCells;
-  }
-
-  return mobility;
-}
-
-/**
  * ゲーム状態を評価し、スコアを返します。
  * 正のスコアは指定プレイヤーに有利、負のスコアは不利を示します。
  *
@@ -313,54 +275,125 @@ function countMobility(state, color) {
  * - 駒数スコア: 盤面上の駒の数の差
  * - 機動力スコア: 実行可能なアクション数の差
  *
+ * ラインスコアの重みについて:
+ * 4目の勝ちは「その手で4目が成立した」ときだけなので、盤上に残っている4目は
+ * それ自体では勝ちではない。ただし1枚抜いて戻せば成立する2手の勝ち筋であり、
+ * 相手はそれを常に防ぎ続けなければならない。よって高い評価のままでよい。
+ * （4目の重みを 500〜20000 で振って自己対戦させたところ、1500以上はどれも
+ *   互角で、3目(420)に近い500だけが明確に弱かった）
+ * 相手の4目は自分より少し高いペナルティにして防御を重視する。
+ *
+ * 機動力は listActions() を呼ぶと末端評価には重すぎるため、
+ * 「自分の駒に隣接する空きマスの数」＋「持ち駒が残っていれば空きマスの数」で近似する。
+ * 斜めスライドは数えないが、評価は差分でしか使わないため実用上問題ない。
+ *
  * @param {Object} state - 評価するゲーム状態
  * @param {'black'|'white'} color - 評価の基準となるプレイヤーの色
- * @returns {number} 評価スコア（勝利: +100000、敗北: -100000）
+ * @returns {number} 評価スコア（勝利: +WIN_SCORE、敗北: -WIN_SCORE）
  */
 function evaluateState(state, color) {
   // 終了状態の場合は勝敗で決定的なスコアを返す
   if (state.status === "finished") {
     // 勝ち・負け・引き分けで決定的なスコアを返す
     if (state.winner === color) {
-      return 100000;   // 勝利
+      return WIN_SCORE;   // 勝利
     }
     if (state.winner) {
-      return -100000;  // 敗北
+      return -WIN_SCORE;  // 敗北
     }
-    return 0;          // 引き分け（双方とも合法手なし）
+    return 0;             // 引き分け（双方とも合法手なし）
   }
 
-  const opponent = getOpponent(color);
+  const board = state.board;
+  let emptyCells = 0;
+  let myPieces = 0;
+  let opponentPieces = 0;
 
-  // 自分と相手のラインをカウント
-  const myLines = lineCounts(state.board, color);
-  const oppLines = lineCounts(state.board, opponent);
+  // 盤面を数値に置き換えながら、駒と空きマスを数える
+  for (let index = 0; index < CELL_COUNT; index += 1) {
+    const cell = board[CELL_ROW[index]][CELL_COL[index]];
+    // 空き・自分の駒・相手の駒で符号を分ける
+    if (cell === null) {
+      CELL_CODES[index] = 0;
+      emptyCells += 1;
+    } else if (cell === color) {
+      CELL_CODES[index] = 1;
+      myPieces += 1;
+    } else {
+      CELL_CODES[index] = 2;
+      opponentPieces += 1;
+    }
+  }
 
   // ラインスコアの計算
-  //
-  // 4目の勝ちは「その手で4目が成立した」ときだけなので、盤上に残っている4目は
-  // それ自体では勝ちではない。ただし1枚抜いて戻せば成立する2手の勝ち筋であり、
-  // 相手はそれを常に防ぎ続けなければならない。よって高い評価のままでよい。
-  // （4目の重みを 500〜20000 で振って自己対戦させたところ、1500以上はどれも
-  //   互角で、3目(420)に近い500だけが明確に弱かった）
-  //
-  // 相手の4目は自分より少し高いペナルティ（防御重視）
-  const lineScore =
-    myLines[4] * 8000 +
-    myLines[3] * 420 +
-    myLines[2] * 60 +
-    myLines[1] * 10 -
-    (oppLines[4] * 8200 + oppLines[3] * 440 + oppLines[2] * 70 + oppLines[1] * 10);
+  // 各列を端から見て、同じ色が続く区間（ライン）ごとに長さに応じた点を足し引きする
+  let lineScore = 0;
+  for (let k = 0; k < LINES.length; k += 1) {
+    const line = LINES[k];
+    let runCode = 0;
+    let runLength = 0;
+    // 列の末尾の1つ先まで回し、最後のラインもそこで締める
+    for (let j = 0; j <= line.length; j += 1) {
+      let code = 0;
+      // 列の末尾の1つ先は空きマスとして扱う
+      if (j < line.length) {
+        code = CELL_CODES[line[j]];
+      }
+      // 同じ色の駒が続いていればラインを伸ばす
+      if (code !== 0 && code === runCode) {
+        runLength += 1;
+        continue;
+      }
+      // ラインが途切れたので、その長さに応じて点を付ける
+      if (runCode === 1) {
+        lineScore += MY_LINE_SCORES[Math.min(runLength, 5)];
+      } else if (runCode === 2) {
+        lineScore -= OPPONENT_LINE_SCORES[Math.min(runLength, 5)];
+      }
+      runCode = code;
+      runLength = 1;
+    }
+  }
+
+  // 機動力（駒の隣にある空きマスの数）を自分と相手で別々に数える
+  let myMobility = 0;
+  let opponentMobility = 0;
+  for (let index = 0; index < CELL_COUNT; index += 1) {
+    const code = CELL_CODES[index];
+    // 空きマスは動かす駒が無いので数えない
+    if (code === 0) {
+      continue;
+    }
+    const neighbors = NEIGHBORS[index];
+    let free = 0;
+    // 隣接マスのうち空いている数だけ動ける先がある
+    for (let j = 0; j < neighbors.length; j += 1) {
+      if (CELL_CODES[neighbors[j]] === 0) {
+        free += 1;
+      }
+    }
+    // 駒の持ち主の側に加算する
+    if (code === 1) {
+      myMobility += free;
+    } else {
+      opponentMobility += free;
+    }
+  }
+
+  // 持ち駒が残っていれば空きマスすべてが「打つ」手になる
+  const opponent = getOpponent(color);
+  if ((state.placed[color] || 0) < MAX_PIECES) {
+    myMobility += emptyCells;
+  }
+  if ((state.placed[opponent] || 0) < MAX_PIECES) {
+    opponentMobility += emptyCells;
+  }
 
   // 駒数スコア（盤面上の駒の差）
-  const pieceScore =
-    (countPieces(state.board, color) - countPieces(state.board, opponent)) * 5;
+  const pieceScore = (myPieces - opponentPieces) * 5;
 
   // 機動力スコア（選択肢の多さ）
-  // listActions() は配列とSetを確保するため末端評価で呼ぶには重すぎる。
-  // 隣接する空きマス数＋打てる手数による近似で代用する。
-  const mobilityScore =
-    (countMobility(state, color) - countMobility(state, opponent)) * 2;
+  const mobilityScore = (myMobility - opponentMobility) * 2;
 
   return lineScore + pieceScore + mobilityScore;
 }
@@ -405,16 +438,42 @@ function serializeState(state) {
   return `${code.toString(36)}.${turnBit}${state.placed.black}${state.placed.white}`;
 }
 
-/**
- * 予算切れで1手も評価できなかったときに、深さ1で読み直すためのノード数。
- * 1局面の子ノードを見るだけなので、これで足りる。
- */
-const RETRY_NODE_BUDGET = 200;
+// =============================================================================
+// 探索
+// =============================================================================
 
 /** トランスポジションテーブルの評価値の種類 */
 const TT_EXACT = 0;
 const TT_LOWER = 1;
 const TT_UPPER = 2;
+
+/**
+ * ヒストリー表の1色ぶんの大きさ。
+ * 移動は「移動元×移動先」の 25×25 通り、打つ手は移動先の 25 通り。
+ */
+const HISTORY_SIZE = CELL_COUNT * CELL_COUNT + CELL_COUNT;
+
+/**
+ * 手をヒストリー表の添字に変換します。
+ * @param {Object} action - 手
+ * @returns {number} ヒストリー表の添字
+ */
+function historyIndex(action) {
+  const to = action.to.row * BOARD_SIZE + action.to.col;
+
+  // 白の手は表の後半を使う
+  let base = 0;
+  if (action.color === "white") {
+    base = HISTORY_SIZE;
+  }
+
+  // 打つ手には移動元が無いので、移動の領域の後ろを使う
+  if (action.type === "place") {
+    return base + CELL_COUNT * CELL_COUNT + to;
+  }
+  const from = action.from.row * BOARD_SIZE + action.from.col;
+  return base + from * CELL_COUNT + to;
+}
 
 /**
  * 手の並べ替え用のスコアを付けます。
@@ -465,9 +524,6 @@ function orderingScore(state, action, color) {
 /**
  * 根の手を評価順に並べて返します。
  *
- * 分割探索では毎回このリストの index で再開するので、
- * 同じ局面なら必ず同じ順序になる必要がある（乱数を使わない）。
- *
  * 反復深化では、1つ浅い深さでの最善手を hint として必ず先頭に置く。
  * これがあるおかげで、深い探索を読み切れずに打ち切っても
  * 「前の深さの最善手か、それより良いと分かった手」しか返らない。
@@ -507,16 +563,20 @@ function listRootActions(state, color, hint = null) {
  * 経過時間による打ち切りはWorkers上では一切機能しない。
  * ノード数なら決定的に効くうえ、CPU時間ともほぼ比例する。
  *
+ * 置換表とヒストリー表は、反復深化の各深さで使い回す。
+ *
  * @param {'black'|'white'} color - CPUプレイヤーの色（最大化する側）
- * @param {number} nodeBudget - 探索するノード数の上限
- * @param {Map} [sharedTable=null] - ティックをまたいで使い回す置換表。
- *   省略時はこの探索専用の表を作る。
- * @returns {{evaluate: Function, nodes: Function, aborted: Function}} 探索コンテキスト
+ * @param {number} nodeBudget - 探索するノード数の上限（反復深化の全深さの合計）
+ * @returns {{evaluate: Function, nodes: Function}} 探索コンテキスト
  */
-function createSearchContext(color, nodeBudget, sharedTable = null) {
-  const table = sharedTable || new Map();
+function createSearchContext(color, nodeBudget) {
+  const table = new Map();
+
+  // ヒストリーヒューリスティック用の表。
+  // 枝刈りを起こした手を覚えておき、別の局面でも先に調べる。
+  const history = new Float64Array(HISTORY_SIZE * 2);
+
   let nodes = 0;
-  let aborted = false;
 
   /**
    * 再帰的に局面を評価します（ミニマックス法）
@@ -530,34 +590,50 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
     nodes += 1;
     // ノード数の予算を使い切ったらこの探索を打ち切る
     if (nodes > nodeBudget) {
-      aborted = true;
       return { score: 0, aborted: true };
     }
 
-    // 読み切った深さ、または終局した局面は評価関数の値をそのまま返す
-    if (depth === 0 || current.status === "finished") {
+    // 終局した局面は「早く勝つ・遅く負ける」ほど良いよう、残りの深さで補正する。
+    // 補正しないと、勝てる局面で勝ちを先延ばしにしたり、
+    // 負けを読み切った局面で最も早く負ける手を選んだりする。
+    if (current.status === "finished") {
+      let terminal = evaluateState(current, color);
+      // 勝ちは早いほど、負けは遅いほど評価を高くする
+      if (terminal > 0) {
+        terminal += depth;
+      } else if (terminal < 0) {
+        terminal -= depth;
+      }
+      return { score: terminal, aborted: false };
+    }
+
+    // 読み切った深さでは評価関数の値をそのまま返す
+    if (depth === 0) {
       return { score: evaluateState(current, color), aborted: false };
     }
 
-    const alphaOrigin = alpha;
+    // 置換表に記録する値の種類を決めるため、呼び出し時の探索窓を残しておく
+    const alphaAtEntry = alpha;
+    const betaAtEntry = beta;
+
     const key = serializeState(current);
     const cached = table.get(key);
 
-    // 同じ局面を同じ深さ以上で読んだ結果が残っていれば再利用する
+    // 同じ局面を同じ深さ以上で読んだ結果が残っていれば再利用する。
+    // 上限・下限の記録で探索窓を狭めることはしない。狭めた窓で得た値に
+    // 確定値の印を付けて保存してしまい、誤った値が広がるため。
     if (cached && cached.depth >= depth) {
       // 確定値なら探索せずにそのまま返せる
       if (cached.flag === TT_EXACT) {
-        return { score: cached.score, aborted: false, bestAction: cached.action };
+        return { score: cached.score, aborted: false };
       }
-      // 上限・下限の記録なら探索窓を狭めるのに使う
-      if (cached.flag === TT_LOWER && cached.score > alpha) {
-        alpha = cached.score;
-      } else if (cached.flag === TT_UPPER && cached.score < beta) {
-        beta = cached.score;
+      // 下限が既にベータ以上なら、本当の値も窓の外なので打ち切れる
+      if (cached.flag === TT_LOWER && cached.score >= beta) {
+        return { score: cached.score, aborted: false };
       }
-      // 窓が閉じたらこれ以上調べても結果は変わらない
-      if (alpha >= beta) {
-        return { score: cached.score, aborted: false, bestAction: cached.action };
+      // 上限が既にアルファ以下なら、本当の値も窓の外なので打ち切れる
+      if (cached.flag === TT_UPPER && cached.score <= alpha) {
+        return { score: cached.score, aborted: false };
       }
     }
 
@@ -567,29 +643,23 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
       return { score: evaluateState(current, color), aborted: false };
     }
 
-    // 良さそうな手から調べるほど枝を切れる。浅い探索で得た手があれば最優先。
-    //
-    // 並べ替えは depth>=2 のときだけ行う。葉の直前(depth==1)では子がすべて
-    // 評価関数の呼び出しで終わるため、並べ替えの費用のほうが高くつく。
     // 置換表に最善手が残っていれば並べ替えのヒントとして使う
     let hint = null;
     if (cached) {
       hint = cached.action;
     }
-    const ordered = actions.length > 1 && depth >= 2;
-    let scores = null;
-    if (ordered) {
-      const turnColor = current.turn;
-      // スコアは1手につき1回だけ計算する。
-      // 比較関数の中で計算すると O(n log n) 回呼ばれてしまう。
-      scores = new Array(actions.length);
-      for (let i = 0; i < actions.length; i += 1) {
-        // ヒントと同じ手は最優先で調べる
-        if (hint && sameAction(actions[i], hint)) {
-          scores[i] = Number.POSITIVE_INFINITY;
-        } else {
-          scores[i] = orderingScore(current, actions[i], turnColor);
-        }
+
+    // 良さそうな手から調べるほど枝を切れる。
+    // 着手先の周囲から見た推定に、これまで枝刈りを起こした実績（ヒストリー）を足す。
+    // スコアは1手につき1回だけ計算する（比較関数の中で計算すると O(n log n) 回呼ばれる）。
+    const turnColor = current.turn;
+    const scores = new Array(actions.length);
+    for (let i = 0; i < actions.length; i += 1) {
+      // ヒントと同じ手は最優先で調べる
+      if (hint && sameAction(actions[i], hint)) {
+        scores[i] = Number.POSITIVE_INFINITY;
+      } else {
+        scores[i] = orderingScore(current, actions[i], turnColor) + history[historyIndex(actions[i])];
       }
     }
 
@@ -603,26 +673,24 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
 
     // 手を1つずつ試し、アルファベータ窓が閉じた時点で打ち切る
     for (let i = 0; i < actions.length; i += 1) {
-      if (ordered) {
-        // 未調査の中から最良の手を i 番目へ持ってくる（選択ソートの1ステップ）。
-        // 枝刈りで数手見ただけで抜けることが多いため、
-        // 最初に全部並べ替えるより実際に触る回数がずっと少なくて済む。
-        let pick = i;
-        // 未調査の範囲から最もスコアの高い手を探す
-        for (let j = i + 1; j < actions.length; j += 1) {
-          if (scores[j] > scores[pick]) {
-            pick = j;
-          }
+      // 未調査の中から最良の手を i 番目へ持ってくる（選択ソートの1ステップ）。
+      // 枝刈りで数手見ただけで抜けることが多いため、
+      // 最初に全部並べ替えるより実際に触る回数がずっと少なくて済む。
+      let pick = i;
+      // 未調査の範囲から最もスコアの高い手を探す
+      for (let j = i + 1; j < actions.length; j += 1) {
+        if (scores[j] > scores[pick]) {
+          pick = j;
         }
-        // 見つかった手を i 番目と入れ替える
-        if (pick !== i) {
-          const swapAction = actions[i];
-          actions[i] = actions[pick];
-          actions[pick] = swapAction;
-          const swapScore = scores[i];
-          scores[i] = scores[pick];
-          scores[pick] = swapScore;
-        }
+      }
+      // 見つかった手を i 番目と入れ替える
+      if (pick !== i) {
+        const swapAction = actions[i];
+        actions[i] = actions[pick];
+        actions[pick] = swapAction;
+        const swapScore = scores[i];
+        scores[i] = scores[pick];
+        scores[pick] = swapScore;
       }
 
       const action = actions[i];
@@ -651,8 +719,10 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
         if (bestScore > alpha) {
           alpha = bestScore;
         }
-        // 窓が閉じたら、残りの手を調べても結果は変わらない
+        // 窓が閉じたら、残りの手を調べても結果は変わらない。
+        // 枝刈りを起こした手として、深い局面ほど重くヒストリーに記録する
         if (alpha >= beta) {
+          history[historyIndex(action)] += depth * depth;
           break;
         }
       } else {
@@ -665,8 +735,10 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
         if (bestScore < beta) {
           beta = bestScore;
         }
-        // 窓が閉じたら、残りの手を調べても結果は変わらない
+        // 窓が閉じたら、残りの手を調べても結果は変わらない。
+        // 枝刈りを起こした手として、深い局面ほど重くヒストリーに記録する
         if (beta <= alpha) {
+          history[historyIndex(action)] += depth * depth;
           break;
         }
       }
@@ -677,111 +749,59 @@ function createSearchContext(color, nodeBudget, sharedTable = null) {
       return { score: evaluateState(current, color), aborted: false };
     }
 
-    // 得られた値が確定値か、探索窓による上限・下限かを記録して再利用できるようにする
+    // 得られた値が確定値か、探索窓による上限・下限かを記録して再利用できるようにする。
+    // ループ中に alpha / beta を書き換えているので、判定には呼び出し時の窓を使う。
     let flag = TT_EXACT;
-    if (bestScore <= alphaOrigin) {
+    if (bestScore <= alphaAtEntry) {
+      // どの手もアルファを超えなかった。本当の値はこれ以下
       flag = TT_UPPER;
-    } else if (bestScore >= beta) {
+    } else if (bestScore >= betaAtEntry) {
+      // ベータ以上の手が見つかって打ち切った。本当の値はこれ以上
       flag = TT_LOWER;
     }
     table.set(key, { depth, score: bestScore, flag, action: bestAction });
 
-    return { score: bestScore, aborted: false, bestAction };
+    return { score: bestScore, aborted: false };
   };
 
   return {
     evaluate,
     nodes: () => nodes,
-    aborted: () => aborted,
   };
 }
 
 /**
- * 根の手を index から順に評価します。ノード数の予算を使い切ったら中断し、
- * 次に再開すべき index を返します。
+ * 1つの深さについて、根の手を順に評価します。
  *
- * 1回のリクエストで使えるCPU時間は無料プランで10msしかないため、
- * 深い探索は複数のアラームに分割して進める。分割しても各リクエストの
- * CPU時間は予算で頭打ちになる。
+ * 根の手は1つ浅い深さでの最善手（hint）から調べる。ノード数の予算が途中で尽きた場合は、
+ * そこまでに読み切れた手の中の最善手を返す。先頭の hint を読み切れていれば、
+ * 返るのは「hint か、同じ深さで hint より良いと分かった手」だけになる。
  *
- * @param {Object} state - 現在のゲーム状態
+ * @param {Object} state - 現在のゲーム状態（正規化済み）
  * @param {'black'|'white'} color - CPUプレイヤーの色
- * @param {Object} options - オプション
- * @param {number} options.depth - 探索深度
- * @param {number} [options.startIndex=0] - 再開する根の手のindex
- * @param {number} [options.nodeBudget=1200] - このバッチで使えるノード数
- * @param {number} [options.bestScore=-Infinity] - ここまでの最善評価値
- * @param {Object} [options.bestAction=null] - ここまでの最善手
- * @param {Object} [options.hintAction=null] - 最初に調べる手（1つ浅い深さでの最善手）
- * @param {Map} [options.table=null] - ティックをまたいで使い回す置換表
- * @returns {Object} 進捗と最善手
+ * @param {number} depth - 探索深度
+ * @param {Object} context - createSearchContext() で作った探索コンテキスト
+ * @param {Object|null} hint - 1つ浅い深さでの最善手
+ * @returns {{done: boolean, bestScore: number, bestAction: Object|null}} 結果
  */
-function searchRootBatch(rootState, color, options) {
-  const depth = options.depth;
-  const startIndex = options.startIndex || 0;
-  const nodeBudget = options.nodeBudget || 1200;
-
-  // 置換表はティックをまたいで渡された場合のみ使い回す
-  let table = null;
-  if (options.table instanceof Map) {
-    table = options.table;
-  }
-
-  // 以降は正規化済みであることを前提に探索する（SEARCH_APPLY 参照）
-  const state = normalizeState(rootState);
-  const actions = listRootActions(state, color, options.hintAction || null);
-  const total = actions.length;
-  // 合法手が無ければ探索するものが無い
-  if (total === 0) {
-    return { done: true, nextIndex: 0, total: 0, bestScore: -Infinity, bestAction: null, nodes: 0 };
-  }
-
-  const context = createSearchContext(color, nodeBudget, table);
-
-  // 前のティックから引き継いだ暫定最善値があればそこから再開する
+function searchRoot(state, color, depth, context, hint) {
+  const actions = listRootActions(state, color, hint);
   let bestScore = -Infinity;
-  if (typeof options.bestScore === "number") {
-    bestScore = options.bestScore;
-  }
-  let bestAction = options.bestAction || null;
-  let index = startIndex;
-  let evaluated = 0;
+  let bestAction = null;
 
-  // 根の手を index から順に評価し、予算を使い切ったところで中断する
-  while (index < total) {
-    const action = actions[index];
+  // 根の手を順に評価する
+  for (const action of actions) {
     const result = applyAction(state, action, SEARCH_APPLY);
-
     // ルール上成立しない手は読み飛ばす
     if (!result.ok) {
-      index += 1;
       continue;
     }
 
     // これまでの最善値をアルファに使う（根は最大化なので有効）
     const child = context.evaluate(result.state, depth - 1, bestScore, Infinity);
-
+    // 予算切れ。この深さはここまでで打ち切る
     if (child.aborted) {
-      // 予算切れ。この手はまだ評価できていないので次のティックで調べ直す。
-      //
-      // ただし1手も評価できないまま終わると永久に進まないので、その場合だけは
-      // 浅い深さで評価し直して必ず1手ぶん進める。
-      if (evaluated > 0) {
-        break;
-      }
-      // 深さ1の読み直しに必要なのは高々1手ぶんの子ノードなので、予算は小さくてよい。
-      // ここに nodeBudget をそのまま渡すと、1ティックのCPU時間が最悪2倍になる。
-      const shallow = createSearchContext(color, Math.min(nodeBudget, RETRY_NODE_BUDGET), table);
-      // 深さ1で読み直して、この手を必ず1つは評価しておく
-      const retry = shallow.evaluate(result.state, 1, -Infinity, Infinity);
-      // 読み直しが成立し、より良い（または初めての）手なら採用する
-      if (!retry.aborted && (retry.score > bestScore || bestAction === null)) {
-        bestScore = retry.score;
-        bestAction = action;
-      }
-      index += 1;
-      evaluated += 1;
-      break;
+      return { done: false, bestScore, bestAction };
     }
 
     // より良い（または初めての）手が見つかったら最善手を更新する
@@ -789,149 +809,24 @@ function searchRootBatch(rootState, color, options) {
       bestScore = child.score;
       bestAction = action;
     }
-
-    index += 1;
-    evaluated += 1;
-
-    // 予算を使い切ったらこのティックはここまでにする
-    if (context.nodes() >= nodeBudget) {
-      break;
-    }
   }
 
-  return {
-    done: index >= total,
-    nextIndex: index,
-    total,
-    bestScore,
-    bestAction,
-    nodes: context.nodes(),
-  };
-}
-
-/**
- * 置換表のエントリ数の上限。
- * 1手ぶんの探索で使い回すだけなので、これを超えたら丸ごと捨てて作り直す。
- */
-const TABLE_LIMIT = 30000;
-
-/**
- * CPUの1手ぶんの探索の進捗を作ります。
- *
- * アラームをまたいで持ち回るため、そのまま構造化クローンできる
- * プレーンなオブジェクトにする（置換表は別に持つ）。
- *
- * @param {string} signature - 局面の指紋。別の局面の途中結果を捨てるのに使う
- * @returns {Object} 進捗オブジェクト
- */
-function createCpuSearch(signature) {
-  return {
-    signature,
-    ticks: 0,        // 消費したアラームの回数
-    depth: 1,        // いま読んでいる深さ
-    index: 0,        // その深さで次に調べる根の手
-    bestScore: null, // その深さでの暫定最善値（-Infinity は保存できないのでnull）
-    bestAction: null,
-    action: null,    // 読み切れた最大の深さでの最善手（実際に指す手）
-    doneDepth: 0,    // 読み切れた最大の深さ
-  };
-}
-
-/**
- * CPUの探索を1ティックぶん進めます。
- *
- * 固定の深さで探索すると、予算内に根の手を全部調べ切れなかったときに
- * 「最初の数手の中の最善手」を指してしまい、浅く読んだ場合よりはるかに
- * 弱くなる。そこで深さ1から順に読み、読み切れた深さの結果を必ず手元に
- * 残す（反復深化）。深い探索を打ち切っても、1つ浅い深さの最善手を先頭に
- * 調べているので、返るのはその手か、それより良いと分かった手だけになる。
- *
- * @param {Object} state - 現在のゲーム状態
- * @param {'black'|'white'} color - CPUプレイヤーの色
- * @param {Object} progress - createCpuSearch() で作った進捗（破壊的に更新される）
- * @param {Object} config - 探索設定
- * @param {number} config.maxDepth - 読む深さの上限
- * @param {number} config.nodeBudget - 1ティックで使えるノード数
- * @param {Map} [config.table] - ティックをまたいで使い回す置換表
- * @returns {{done: boolean, action: Object|null}} 打ち切ってよいかと、現時点の着手
- */
-function stepCpuSearch(state, color, progress, config) {
-  // 置換表は渡された場合のみ使い回す
-  let table = null;
-  if (config.table instanceof Map) {
-    table = config.table;
-  }
-  // 肥大化した置換表は丸ごと捨てて作り直す
-  if (table && table.size > TABLE_LIMIT) {
-    table.clear();
-  }
-
-  // -Infinity は保存に向かないので null で持ち回している。ここで元に戻す
-  let resumeScore = -Infinity;
-  if (progress.bestScore !== null) {
-    resumeScore = progress.bestScore;
-  }
-
-  // 現在の深さの続きを1ティックぶんだけ進める
-  const batch = searchRootBatch(state, color, {
-    depth: progress.depth,
-    startIndex: progress.index,
-    nodeBudget: config.nodeBudget,
-    bestScore: resumeScore,
-    bestAction: progress.bestAction,
-    hintAction: progress.action,
-    table,
-  });
-
-  progress.ticks += 1;
-
-  // ±Infinity は保存できないので null に落として持ち回す
-  if (Number.isFinite(batch.bestScore)) {
-    progress.bestScore = batch.bestScore;
-  } else {
-    progress.bestScore = null;
-  }
-  progress.bestAction = batch.bestAction;
-
-  // この深さを読み切れていなければ、次のティックで続きから読む
-  if (!batch.done) {
-    // この深さはまだ途中。次のティックで続きから読む
-    progress.index = batch.nextIndex;
-    return { done: false, action: batch.bestAction || progress.action };
-  }
-
-  // この深さを読み切ったので、その結果を「実際に指す手」として確定させる
-  if (batch.bestAction) {
-    progress.action = batch.bestAction;
-    progress.doneDepth = progress.depth;
-  }
-  // 指す手が無い、または深さの上限に達したら思考を終える
-  if (!batch.bestAction || progress.depth >= config.maxDepth) {
-    return { done: true, action: progress.action };
-  }
-
-  // 次の深さへ
-  progress.depth += 1;
-  progress.index = 0;
-  progress.bestScore = null;
-  progress.bestAction = null;
-  return { done: false, action: progress.action };
+  return { done: true, bestScore, bestAction };
 }
 
 /**
  * ミニマックス法（アルファベータ枝刈り）で最善手を探索します。
- * 反復深化により、ノード数の予算内で可能な限り深く探索します。
  *
- * 1リクエストで完結させたい場面（浅い保険の探索など）で使います。
- * 深い探索は searchRootBatch で分割してください。
+ * 深さ1から順に読み（反復深化）、ノード数の予算を使い切るか深さの上限に
+ * 達した時点の最善手を返す。予算は全深さの合計で、CPU時間はおおむねこれに比例する。
  *
- * @param {Object} state - 現在のゲーム状態
+ * @param {Object} rootState - 現在のゲーム状態
  * @param {'black'|'white'} color - CPUプレイヤーの色
  * @param {Object} [options={}] - 探索オプション
  * @param {number} [options.maxDepth=4] - 最大探索深度
  * @param {number} [options.nodeBudget=1200] - 探索するノード数の上限
  * @param {Object} [options.stats] - 探索結果の統計を書き戻すオブジェクト（任意）
- * @returns {Object|null} 最善手（見つからない場合はnull）
+ * @returns {Object|null} 最善手（合法手が無い場合はnull）
  */
 function searchBestMove(rootState, color, options = {}) {
   const maxDepth = options.maxDepth || 4;
@@ -939,40 +834,39 @@ function searchBestMove(rootState, color, options = {}) {
 
   // 以降は正規化済みであることを前提に探索する（SEARCH_APPLY 参照）
   const state = normalizeState(rootState);
+  const context = createSearchContext(color, nodeBudget);
 
   let best = null;
+  let bestScore = -Infinity;
   let reachedDepth = 0;
-  let nodes = 0;
 
   // 反復深化: 深度1から徐々に深く探索
   for (let depth = 1; depth <= maxDepth; depth += 1) {
-    const remaining = nodeBudget - nodes;
-    // ノード数の予算を使い切ったらこれ以上深くは読まない
-    if (remaining <= 0) {
-      break;
-    }
+    const result = searchRoot(state, color, depth, context, best);
 
-    const result = searchRootBatch(state, color, { depth, nodeBudget: remaining });
-    nodes += result.nodes;
-
-    // 手が得られていれば、より深い結果で上書きしていく
+    // 読み切れなかった深さでも、見つかった手は前の深さの最善手と同等以上なので採用する
     if (result.bestAction) {
       best = result.bestAction;
-      if (result.done) {
-        reachedDepth = depth;
-      }
+      bestScore = result.bestScore;
     }
 
-    // この深さを読み切れなかった場合、さらに深く読んでも意味がない
+    // 予算を使い切ったら、これ以上深くは読めない
     if (!result.done) {
+      break;
+    }
+    reachedDepth = depth;
+
+    // 合法手が無い、または勝敗まで読み切れたら、さらに深く読んでも結果は変わらない
+    if (!result.bestAction || Math.abs(result.bestScore) >= WIN_SCORE) {
       break;
     }
   }
 
   // 呼び出し側が統計を求めていれば書き戻す
   if (options.stats) {
-    options.stats.nodes = nodes;
+    options.stats.nodes = Math.min(context.nodes(), nodeBudget);
     options.stats.depth = reachedDepth;
+    options.stats.score = bestScore;
   }
 
   // 探索で手が決まっていればそれを指す
@@ -1018,35 +912,31 @@ function sameAction(a, b) {
  * CPUの難易度ごとの探索設定。
  *
  * depth      … 読む深さの上限（反復深化なので、予算内で届いた深さまでを使う）
- * nodeBudget … 1リクエストあたりに探索するノード数の上限
- * maxTicks   … 1手の思考に使うアラームの回数
+ * nodeBudget … 1手の思考で探索するノード数の上限（CPU時間はおおむねこれに比例する）
  *
- * 無料プランは 1リクエストあたり CPU 10ms なので、深く読むには
- * 探索を複数のアラームに分割するしかない。nodeBudget が1回あたりの
- * CPU時間を、maxTicks が1手にかける総量を決める。
+ * 思考は Durable Object のアラーム1回の中で行う。Durable Object に 10ms の
+ * CPU 制限はかからないが、思考中はそのルームのほかのイベントが待たされるので、
+ * 1手あたり CPU 数百 ms 程度に収める。本番の CPU は手元の Mac より約3倍遅い
+ * （docs/cloudflare-cpu-limit.md）。
  *
- * depth は「固定の深さ」ではなく上限であることに注意。反復深化により
- * 浅い深さから順に読み、予算が尽きた時点で読み切れている最良の結果を使う。
- * そのため上限を上げても、届かなければ弱くなるだけということはない。
- *
- * @type {Object<string, {depth: number, nodeBudget: number, maxTicks: number}>}
+ * @type {Object<string, {depth: number, nodeBudget: number}>}
  */
 const CPU_LEVELS = {
-  easy: { depth: 2, nodeBudget: 600, maxTicks: 1 },
-  normal: { depth: 3, nodeBudget: 800, maxTicks: 2 },
-  hard: { depth: 4, nodeBudget: 1100, maxTicks: 3 },
-  strong: { depth: 5, nodeBudget: 1800, maxTicks: 4 },
+  easy: { depth: 1, nodeBudget: 1000 },
+  normal: { depth: 2, nodeBudget: 4000 },
+  hard: { depth: 4, nodeBudget: 8000 },
+  strong: { depth: 20, nodeBudget: 30000 },
 };
 
 /**
  * 難易度名と環境変数から、実際に使う探索設定を決定します。
  *
- * CPU_MAX_DEPTH / CPU_NODE_BUDGET / CPU_MAX_TICKS が設定されている場合は
- * 上限として作用し、難易度ごとの値がそれを超えないよう切り詰めます。
+ * CPU_MAX_DEPTH / CPU_NODE_BUDGET が設定されている場合は上限として作用し、
+ * 難易度ごとの値がそれを超えないよう切り詰めます。
  *
  * @param {string} levelName - 難易度名（easy/normal/hard/strong）
  * @param {Object} [env={}] - Workers の環境変数
- * @returns {{level: string, depth: number, nodeBudget: number, maxTicks: number}} 探索設定
+ * @returns {{level: string, depth: number, nodeBudget: number}} 探索設定
  */
 function resolveCpuLevel(levelName, env = {}) {
   // 未知の難易度名が来た場合は最も強い設定にフォールバックする
@@ -1075,19 +965,14 @@ function resolveCpuLevel(levelName, env = {}) {
     level,
     depth: cap(base.depth, env.CPU_MAX_DEPTH),
     nodeBudget: cap(base.nodeBudget, env.CPU_NODE_BUDGET),
-    maxTicks: cap(base.maxTicks, env.CPU_MAX_TICKS),
   };
 }
 
 export {
-  serializeState as positionKey,
   listActions,
   listRootActions,
   evaluateState,
   searchBestMove,
-  searchRootBatch,
-  createCpuSearch,
-  stepCpuSearch,
   CPU_LEVELS,
   resolveCpuLevel,
 };

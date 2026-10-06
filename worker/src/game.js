@@ -85,6 +85,32 @@ function inBounds(row, col) {
 }
 
 /**
+ * マスの種類の早見表（CELL_TYPES[row][col]）。
+ *
+ * CPU対戦の探索は1手ごとに getCellType を何十回も呼ぶため、
+ * 呼び出しのたびに文字列キーを組み立てて Set を引くと、そのコストが効いてくる。
+ * 盤面は固定なので、起動時に1度だけ表にしておく。
+ * @type {Array<Array<'neutral'|'black'|'white'>>}
+ */
+const CELL_TYPES = [];
+// 全マスについて、中立・黒・白のどれかを先に求めておく
+for (let row = 0; row < BOARD_SIZE; row += 1) {
+  const line = [];
+  for (let col = 0; col < BOARD_SIZE; col += 1) {
+    const key = `${row},${col}`;
+    // 中立マス、黒マスの順に判定し、どちらでもなければ白マス
+    if (NEUTRAL_POSITIONS.has(key)) {
+      line.push('neutral');
+    } else if (BLACK_POSITIONS.has(key)) {
+      line.push('black');
+    } else {
+      line.push('white');
+    }
+  }
+  CELL_TYPES.push(line);
+}
+
+/**
  * 指定座標のマスの種類を取得します。
  * マスの種類は斜め移動の可否に影響します。
  * @param {number} row - 行番号
@@ -92,14 +118,7 @@ function inBounds(row, col) {
  * @returns {'neutral'|'black'|'white'} マスの種類
  */
 function getCellType(row, col) {
-  const key = `${row},${col}`;
-  if (NEUTRAL_POSITIONS.has(key)) {
-    return 'neutral';
-  }
-  if (BLACK_POSITIONS.has(key)) {
-    return 'black';
-  }
-  return 'white';
+  return CELL_TYPES[row][col];
 }
 
 /**

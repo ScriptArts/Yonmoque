@@ -54,22 +54,22 @@
 
     // --- CPU対戦AIの探索上限 ---
     //
-    // 無料プランは CPU 10ms/リクエスト。深く読むには探索を複数のアラームに
-    // 分割するしかないので、1リクエストあたりの探索量(CPU_NODE_BUDGET)と
-    // 1手にかけるアラームの回数(CPU_MAX_TICKS)で制御する。
+    // 難易度ごとの値（ai.js の CPU_LEVELS）をこれ以下に切り詰める。
+    // コードを変えずに CPU の負荷を下げたいときに使う。上げる方向には効かない。
     //
+    // CPU_NODE_BUDGET は1手の思考で探索するノード数。CPU時間はおおむねこれに比例する。
     // 時間による打ち切りは使えない。Workers の Date.now() は「最後のI/Oの
     // 時刻」を返し、同期処理の途中では進まないため（サイドチャネル対策）。
     //
     // CPU_MAX_DEPTH は反復深化の深さの上限。届かなければ浅い結果を使うだけなので、
     // 上げても弱くはならない。
     //
-    // 実測値(Apple Silicon / 実戦局面): 深さ上限5 / 1800ノード / 4ティックで
-    // 1ティック 平均1.2ms・p95 3.0ms・p99 3.3ms・最大4.5ms。
-    // 有料プランに切り替えたら CPU_MAX_TICKS を増やして総量を伸ばせる。
-    "CPU_MAX_DEPTH": "5",
-    "CPU_NODE_BUDGET": "1800",
-    "CPU_MAX_TICKS": "4",
+    // 思考は Durable Object のアラーム1回の中で行う。Durable Object には無料プランでも
+    // 10ms の CPU 制限がかからない（docs/cloudflare-cpu-limit.md）。
+    // 実測値(Apple Silicon / 実戦局面): 30,000ノードで1手 中央値30ms・p95 37ms・最大73ms。
+    // 本番の CPU はこの約3倍かかる。
+    "CPU_MAX_DEPTH": "20",
+    "CPU_NODE_BUDGET": "30000",
 
     // パスワードハッシュの反復回数
     "PBKDF2_ITERATIONS": "100000"

@@ -19,7 +19,7 @@ import {
   normalizeState,
   applyAction,
 } from "./game.js";
-import { createCpuSearch, stepCpuSearch, resolveCpuLevel, positionKey } from "./ai.js";
+import { searchBestMove, resolveCpuLevel } from "./ai.js";
 import { encodeEvent, encodeResponse, decodeMessage, PING, PONG } from "./protocol.js";
 
 /** CPUプレイヤーを表す擬似ユーザーID（D1には作らない） */
@@ -33,15 +33,6 @@ const CPU_NICKNAME = "CPU";
 
 /** CPUが着手するまでの遅延（人間らしく見せるため） */
 const CPU_DELAY_MS = 350;
-
-/**
- * 思考を分割して続ける際の、次のアラームまでの間隔。
- *
- * 無料プランは 1リクエストあたり CPU 10ms しか使えないため、深く読むには
- * 探索を複数のアラームに分けるしかない。1回あたりのCPU時間は
- * nodeBudget で頭打ちになり、maxTicks 回まで続きを読む。
- */
-const CPU_TICK_MS = 50;
 
 /** チャット履歴の保持時間（最終発言から30分） */
 const CHAT_TTL_MS = 30 * 60 * 1000;
@@ -60,17 +51,15 @@ export class RoomDurableObject extends DurableObject {
     /** @type {Object} ルームの永続状態 */
     this.state = null;
 
-    // CPU探索の置換表。1手ぶんのアラームをまたいで使い回すだけのキャッシュなので
-    // 永続化はしない（消えても探索し直せるだけで、正しさには影響しない）。
-    /** @type {Map|null} */
-    this.cpuTable = null;
-
     // 起動時（ハイバネーションからの復帰を含む）に状態を復元する。
     // blockConcurrencyWhile の間はイベントが配送されないため、
     // ハンドラが未初期化の状態を触ることはない。
     ctx.blockConcurrencyWhile(async () => {
       const stored = await ctx.storage.get("state");
       this.state = stored || this.createInitialState();
+      // 以前は CPU の思考を複数のアラームに分けており、その途中経過を保存していた。
+      // 今は使わないので、古い状態に残っていれば捨てる
+      delete this.state.cpuSearch;
     });
 
     // ping/pong は Durable Object を起こさずに自動応答させる
@@ -93,7 +82,6 @@ export class RoomDurableObject extends DurableObject {
       chatExpiresAt: null,
       cpu: null,
       cpuMoveAt: null,
-      cpuSearch: null,
     };
   }
 
@@ -475,7 +463,6 @@ export class RoomDurableObject extends DurableObject {
     // CPUが着席していなければ思考の予定を消す
     if (!cpu) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
@@ -483,21 +470,20 @@ export class RoomDurableObject extends DurableObject {
     // CPUの手番でなければ思考の予定を消す
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
-    // 局面が変わったので、前の手番の途中結果は使わない
-    this.state.cpuSearch = null;
     this.state.cpuMoveAt = Date.now() + CPU_DELAY_MS;
   }
 
   /**
-   * CPUの手を1手だけ指します。
+   * CPUの手を1手指します。
    *
-   * 1回のアラームで1手だけ処理し、まだCPUの手番なら次のアラームを仕掛ける。
-   * こうすることで1リクエストあたりのCPU時間を短く保てる
-   * （無料プランは10ms/リクエスト）。
+   * 思考はこのアラーム1回の中で最後まで行う。Durable Object には
+   * 無料プランでも 1リクエスト10ms の CPU 制限がかからないため、
+   * 分割する必要は無い（docs/cloudflare-cpu-limit.md）。
+   * 思考中はこのルームのほかのイベントが待たされるので、探索量は
+   * 難易度ごとのノード数で頭打ちにしている。
    */
   runCpuTurn() {
     const cpu = this.state.cpu;
@@ -510,41 +496,18 @@ export class RoomDurableObject extends DurableObject {
     // CPUの手番でなくなっていたら思考をやめる
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
-    // 局面の指紋。途中結果が別の局面のものなら捨てる。
-    const signature = positionKey(game);
-    let search = this.state.cpuSearch;
-    if (!search || search.signature !== signature) {
-      search = createCpuSearch(signature);
-      this.cpuTable = new Map();
-    }
-    if (!this.cpuTable) {
-      // ハイバネーションから復帰した直後など。置換表だけ作り直せばよい
-      this.cpuTable = new Map();
-    }
+    // 探索設定は着席時に保存した値ではなく、難易度名から毎回求め直す。
+    // 設定を変えてデプロイしたとき、既に着席しているCPUにもすぐ反映させるため。
+    const config = resolveCpuLevel(cpu.level, this.env);
 
-    const step = stepCpuSearch(game, cpu.color, search, {
-      maxDepth: cpu.depth,
-      nodeBudget: cpu.nodeBudget,
-      table: this.cpuTable,
+    // 最善手を探索する
+    const action = searchBestMove(game, cpu.color, {
+      maxDepth: config.depth,
+      nodeBudget: config.nodeBudget,
     });
-
-    // まだ読み残しがあり、回数の上限にも達していないなら続きを次のアラームで読む。
-    // 1回あたりのCPU時間は nodeBudget で頭打ちになっている。
-    const finished = step.done || search.ticks >= cpu.maxTicks;
-    if (!finished && step.action) {
-      this.state.cpuSearch = search;
-      this.state.cpuMoveAt = Date.now() + CPU_TICK_MS;
-      return;
-    }
-
-    this.state.cpuSearch = null;
-    this.cpuTable = null;
-
-    const action = step.action;
     // 指す手が見つからなかった場合は何もしない
     if (!action) {
       this.state.cpuMoveAt = null;
@@ -1033,9 +996,10 @@ export class RoomDurableObject extends DurableObject {
           return;
         }
 
-        // 難易度と環境変数から探索設定を決めて保持する
+        // 難易度名だけを保持する（未知の名前はここで既定の難易度に置き換える）。
+        // 探索の深さやノード数は、思考のたびに難易度名から求め直す
         const resolved = resolveCpuLevel(payload.level, this.env);
-        this.state.cpu = { color, ...resolved };
+        this.state.cpu = { color, level: resolved.level };
 
         const next = this.getRoomGame();
         // 対局前ならCPUの席を準備完了にしておく
