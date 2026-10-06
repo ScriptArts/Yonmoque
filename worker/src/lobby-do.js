@@ -38,7 +38,11 @@ export class LobbyDurableObject extends DurableObject {
    */
   roomCount() {
     const count = Number(this.env.ROOM_COUNT);
-    return Number.isFinite(count) && count > 0 ? Math.floor(count) : 12;
+    // 環境変数が未設定・不正な場合は既定の12ルームにする
+    if (Number.isFinite(count) && count > 0) {
+      return Math.floor(count);
+    }
+    return 12;
   }
 
   /**
@@ -50,17 +54,21 @@ export class LobbyDurableObject extends DurableObject {
     const total = this.roomCount();
     const result = [];
 
+    // 1番から順に、既知のサマリが無いルームは既定値で埋める
     for (let id = 1; id <= total; id += 1) {
       const known = this.rooms[id];
-      result.push(
-        known || {
+      // 一度も使われていないルームは待機中・空席として扱う
+      if (known) {
+        result.push(known);
+      } else {
+        result.push({
           id,
           name: `ルーム ${id}`,
           status: "waiting",
           seats: { black: null, white: null },
           presence: 0,
-        }
-      );
+        });
+      }
     }
 
     return result;
@@ -71,6 +79,7 @@ export class LobbyDurableObject extends DurableObject {
    */
   broadcastRooms() {
     const message = encodeEvent("rooms:update", this.listRooms());
+    // 接続中のロビークライアント全員へ同じ一覧を送る
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.send(message);
@@ -91,6 +100,7 @@ export class LobbyDurableObject extends DurableObject {
     // --- RoomDO からのサマリ更新通知 ---
     if (url.pathname === "/room-update") {
       const summary = await request.json();
+      // ルームIDが取れないサマリは保存せず、配信もしない
       if (summary && Number.isFinite(summary.id)) {
         this.rooms[summary.id] = summary;
         await this.ctx.storage.put("rooms", this.rooms);
@@ -105,6 +115,7 @@ export class LobbyDurableObject extends DurableObject {
     }
 
     // --- WebSocket 接続 ---
+    // Upgrade ヘッダが無いリクエストはWebSocketとして扱えない
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
@@ -127,15 +138,18 @@ export class LobbyDurableObject extends DurableObject {
    */
   webSocketMessage(ws, raw) {
     const message = decodeMessage(raw);
+    // ack要求以外のメッセージはロビーでは扱わない
     if (!message || message.t !== "req") {
       return;
     }
 
+    // ルーム一覧の再取得要求にはその場で一覧を返す
     if (message.event === "rooms:list") {
       ws.send(JSON.stringify({ t: "res", id: message.id, payload: { ok: true, rooms: this.listRooms() } }));
       return;
     }
 
+    // 未知のイベントは、ack待ちを解放するためにエラーを返す
     if (message.id !== undefined && message.id !== null) {
       ws.send(JSON.stringify({ t: "res", id: message.id, payload: { ok: false, error: "unknown_event" } }));
     }

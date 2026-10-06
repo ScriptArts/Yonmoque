@@ -46,8 +46,13 @@ export default function LobbyPage() {
    * @returns {string} 日本語ラベル
    */
   const statusLabel = (status) => {
-    if (status === 'playing') return '対局中'
-    if (status === 'waiting') return '待機中'
+    // 既知のステータスは日本語へ、未知の値はそのまま返す
+    if (status === 'playing') {
+      return '対局中'
+    }
+    if (status === 'waiting') {
+      return '待機中'
+    }
     return status
   }
 
@@ -57,7 +62,10 @@ export default function LobbyPage() {
    * @returns {string} 表示名
    */
   const displayName = (seat) => {
-    if (!seat) return '空席'
+    // 座席情報が無い場合は空席として表示する
+    if (!seat) {
+      return '空席'
+    }
     return seat.nickname || '名無しプレイヤー'
   }
 
@@ -70,16 +78,19 @@ export default function LobbyPage() {
     // 初回ルーム一覧取得
     apiGet('/api/rooms')
       .then((data) => {
+        // アンマウント後の状態更新を避けるため、有効な間だけ反映する
         if (active) {
           setRooms(data.rooms)
         }
       })
       .catch(() => {
+        // 取得に失敗した場合はエラーメッセージを表示する
         if (active) {
           setError('ルームの取得に失敗しました。')
         }
       })
       .finally(() => {
+        // 成否にかかわらずローディング表示を終了する
         if (active) {
           setLoading(false)
         }
@@ -107,6 +118,18 @@ export default function LobbyPage() {
   // レンダリング
   // -------------------------------------------------------------------------
 
+  // 読み込み中のみ待機メッセージを表示する
+  let loadingView = null
+  if (loading) {
+    loadingView = <div className="py-16 text-center text-sm text-muted-foreground">ルーム読み込み中...</div>
+  }
+
+  // エラーが発生している場合のみ警告を表示する
+  let errorView = null
+  if (error) {
+    errorView = <div className="rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-medium text-destructive">{error}</div>
+  }
+
   return (
     <div className="flex-1 space-y-10 pb-4">
       {/* ===== ページヘッダー =====
@@ -124,18 +147,50 @@ export default function LobbyPage() {
       </div>
 
       {/* ===== ローディング/エラー表示 ===== */}
-      {loading && <div className="py-16 text-center text-sm text-muted-foreground">ルーム読み込み中...</div>}
-      {error && <div className="rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-medium text-destructive">{error}</div>}
+      {loadingView}
+      {errorView}
 
       {/* ===== ルーム一覧グリッド =====
           カード全体が1つのボタン。上端の色帯で状態を示す:
           シアン = 待機中(入れる) / ピンク = 対局中。
           12枚並ぶので、色は「帯・状態文字・入室チップ」の3点だけに使う。 */}
       <div className="grid gap-px overflow-hidden rounded-sm border bg-border sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {/* ルームごとにカードを1枚描画する */}
         {rooms.map((room) => {
           const playing = room.status === 'playing'
           const black = room.seats.black
           const white = room.seats.white
+
+          // 対局中はピンク、待機中はシアンで状態を示す
+          let statusBarClass = "bg-primary"
+          let statusTextClass = "text-primary"
+          if (playing) {
+            statusBarClass = "bg-secondary"
+            statusTextClass = "text-secondary"
+          }
+
+          // 対局中のみ状態ラベルの前に点を表示する
+          let playingDot = null
+          if (playing) {
+            playingDot = <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-secondary align-middle" />
+          }
+
+          // 黒番の席は着席済みなら駒の色で塗り、空席なら輪郭だけにする
+          let blackStoneClass = "border-muted-foreground/25 bg-transparent"
+          let blackNameClass = "text-muted-foreground/70"
+          if (black) {
+            blackStoneClass = "border-gray-800 bg-gray-900"
+            blackNameClass = "text-foreground"
+          }
+
+          // 白番の席も同様に着席状態で見た目を切り替える
+          let whiteStoneClass = "border-muted-foreground/25 bg-transparent"
+          let whiteNameClass = "text-muted-foreground/70"
+          if (white) {
+            whiteStoneClass = "border-gray-400 bg-white"
+            whiteNameClass = "text-foreground"
+          }
+
           return (
             <button
               key={room.id}
@@ -144,16 +199,16 @@ export default function LobbyPage() {
               className="group flex flex-col bg-card text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
             >
               {/* 状態を示す色帯 */}
-              <div className={cn("h-[3px] w-full", playing ? "bg-secondary" : "bg-primary")} />
+              <div className={cn("h-[3px] w-full", statusBarClass)} />
 
               <div className="flex flex-1 flex-col p-4">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="truncate text-sm font-bold tracking-tight">{room.name}</h3>
                   <span className={cn(
                     "shrink-0 text-[11px] font-semibold",
-                    playing ? "text-secondary" : "text-primary"
+                    statusTextClass
                   )}>
-                    {playing && <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-secondary align-middle" />}
+                    {playingDot}
                     {statusLabel(room.status)}
                   </span>
                 </div>
@@ -164,10 +219,10 @@ export default function LobbyPage() {
                     <dt className="shrink-0">
                       <span className={cn(
                         "block h-4 w-4 rounded-full border",
-                        black ? "border-gray-800 bg-gray-900" : "border-muted-foreground/25 bg-transparent"
+                        blackStoneClass
                       )} />
                     </dt>
-                    <dd className={cn("min-w-0 flex-1 truncate font-mono", black ? "text-foreground" : "text-muted-foreground/70")}>
+                    <dd className={cn("min-w-0 flex-1 truncate font-mono", blackNameClass)}>
                       {displayName(black)}
                     </dd>
                   </div>
@@ -175,10 +230,10 @@ export default function LobbyPage() {
                     <dt className="shrink-0">
                       <span className={cn(
                         "block h-4 w-4 rounded-full border",
-                        white ? "border-gray-400 bg-white" : "border-muted-foreground/25 bg-transparent"
+                        whiteStoneClass
                       )} />
                     </dt>
-                    <dd className={cn("min-w-0 flex-1 truncate font-mono", white ? "text-foreground" : "text-muted-foreground/70")}>
+                    <dd className={cn("min-w-0 flex-1 truncate font-mono", whiteNameClass)}>
                       {displayName(white)}
                     </dd>
                   </div>

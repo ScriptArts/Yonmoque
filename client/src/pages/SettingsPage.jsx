@@ -9,7 +9,7 @@
 
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiPost } from '../api'
+import { apiPost, errorCodeOf } from '../api'
 import { useAuth } from '../auth'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -34,7 +34,13 @@ export default function SettingsPage() {
   const [nicknameDraft, setNicknameDraft] = useState(null)
 
   /** 実際に入力欄へ表示する値 */
-  const nickname = nicknameDraft ?? (user?.nickname || '')
+  let nickname = ''
+  // 下書きがある間はそれを、無い間はログイン中ユーザーの現在の値を表示する
+  if (nicknameDraft !== null && nicknameDraft !== undefined) {
+    nickname = nicknameDraft
+  } else if (user) {
+    nickname = user.nickname || ''
+  }
 
   /** ニックネーム保存エラー */
   const [nicknameError, setNicknameError] = useState('')
@@ -68,13 +74,16 @@ export default function SettingsPage() {
     setNicknameNotice('')
 
     try {
+      // ニックネームをサーバーへ保存し、返ってきたユーザー情報で状態を更新する
       const data = await apiPost('/api/me/nickname', { nickname })
       setUser(data.user)
       // 保存後は下書きを破棄し、サーバーから返った値を表示する
       setNicknameDraft(null)
       setNicknameNotice('保存しました。')
     } catch (err) {
-      if (err?.payload?.error === 'nickname_too_long') {
+      // エラーコードに応じて表示するメッセージを切り替える
+      const code = errorCodeOf(err)
+      if (code === 'nickname_too_long') {
         setNicknameError('ニックネームは20文字以内で入力してください。')
       } else {
         setNicknameError('保存に失敗しました。')
@@ -91,20 +100,24 @@ export default function SettingsPage() {
     setPasswordError('')
     setPasswordNotice('')
 
+    // 送信前に文字数を確認し、短すぎる場合はAPIを呼ばずに終える
     if (newPassword.length < 6) {
       setPasswordError('新しいパスワードは6文字以上で入力してください。')
       return
     }
 
     try {
+      // パスワード変更APIを呼び出し、成功したら入力欄を空に戻す
       await apiPost('/api/me/password', { currentPassword, newPassword })
       setPasswordNotice('パスワードを変更しました。')
       setCurrentPassword('')
       setNewPassword('')
     } catch (err) {
-      if (err?.payload?.error === 'invalid_current_password') {
+      // エラーコードに応じて表示するメッセージを切り替える
+      const code = errorCodeOf(err)
+      if (code === 'invalid_current_password') {
         setPasswordError('現在のパスワードが正しくありません。')
-      } else if (err?.payload?.error === 'password_too_short') {
+      } else if (code === 'password_too_short') {
         setPasswordError('新しいパスワードは6文字以上で入力してください。')
       } else {
         setPasswordError('パスワード変更に失敗しました。')
@@ -116,6 +129,36 @@ export default function SettingsPage() {
   // レンダリング
   // -------------------------------------------------------------------------
 
+  // ユーザー情報が未取得の場合に備えてログインIDは空文字にしておく
+  let loginId = ''
+  if (user) {
+    loginId = user.loginId
+  }
+
+  // ニックネームのエラーは、発生している場合だけ表示する
+  let nicknameErrorView = null
+  if (nicknameError) {
+    nicknameErrorView = <p className="text-xs font-medium text-destructive">{nicknameError}</p>
+  }
+
+  // ニックネームの保存完了通知も、ある場合だけ表示する
+  let nicknameNoticeView = null
+  if (nicknameNotice) {
+    nicknameNoticeView = <p className="text-xs font-medium text-primary">{nicknameNotice}</p>
+  }
+
+  // パスワード変更のエラーは、発生している場合だけ表示する
+  let passwordErrorView = null
+  if (passwordError) {
+    passwordErrorView = <p className="text-xs font-medium text-destructive">{passwordError}</p>
+  }
+
+  // パスワード変更の完了通知も、ある場合だけ表示する
+  let passwordNoticeView = null
+  if (passwordNotice) {
+    passwordNoticeView = <p className="text-xs font-medium text-primary">{passwordNotice}</p>
+  }
+
   return (
     <div className="mx-auto w-full max-w-xl space-y-8 pb-4">
       {/* ===== ページヘッダー ===== */}
@@ -123,7 +166,7 @@ export default function SettingsPage() {
         <div>
           <h2 className="text-lg font-bold tracking-tight">アカウント設定</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            ログイン中: <span className="font-mono">{user?.loginId}</span>
+            ログイン中: <span className="font-mono">{loginId}</span>
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => navigate('/lobby')}>
@@ -151,8 +194,8 @@ export default function SettingsPage() {
             <Button type="submit" className="shrink-0">保存</Button>
           </div>
           <p className="text-xs text-muted-foreground">20文字以内で入力してください。</p>
-          {nicknameError && <p className="text-xs font-medium text-destructive">{nicknameError}</p>}
-          {nicknameNotice && <p className="text-xs font-medium text-primary">{nicknameNotice}</p>}
+          {nicknameErrorView}
+          {nicknameNoticeView}
         </form>
       </section>
 
@@ -192,8 +235,8 @@ export default function SettingsPage() {
             />
             <p className="text-xs text-muted-foreground">6文字以上で入力してください。</p>
           </div>
-          {passwordError && <p className="text-xs font-medium text-destructive">{passwordError}</p>}
-          {passwordNotice && <p className="text-xs font-medium text-primary">{passwordNotice}</p>}
+          {passwordErrorView}
+          {passwordNoticeView}
           <div className="flex justify-end pt-1">
             <Button type="submit" variant="secondary">変更する</Button>
           </div>

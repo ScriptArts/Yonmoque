@@ -1,0 +1,18 @@
+{
+  // Durable Object に CPU 10ms 制限がかかるかを確かめるための使い捨て Worker。
+  // 本番の yonmoque とは別名で、本番のリソースには一切触れない。
+  // 計測が終わったら `npx wrangler delete -c ../tools/cpu-probe/wrangler.jsonc` で消す。
+  // 手順と過去の結果は docs/cloudflare-cpu-limit.md を参照。
+  "name": "yonmoque-cpu-probe",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-26",
+  "workers_dev": true,
+
+  // Workers Logs に呼び出しごとの CPU 時間と結果（ok / exceededCpu）を残す
+  "observability": { "enabled": true },
+
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "CpuProbe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CpuProbe"] }]
+}

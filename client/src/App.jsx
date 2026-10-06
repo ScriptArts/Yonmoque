@@ -14,6 +14,7 @@ function RequireAuth({ children }) {
   const { user, loading } = useAuth()
   const location = useLocation()
 
+  // 認証状態の確認中はローディング表示にする
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -22,6 +23,7 @@ function RequireAuth({ children }) {
     )
   }
 
+  // 未ログインならログイン画面へ遷移させる（遷移元を state に保持する）
   if (!user) {
     return <Navigate to="/login" state={{ from: location }} replace />
   }
@@ -35,18 +37,22 @@ export default function App() {
 
   useEffect(() => {
     let active = true
+    // ログイン中のユーザー情報を取得して認証状態を復元する
     apiGet('/api/me')
       .then((data) => {
+        // アンマウント後の状態更新を避けるため、有効な間だけ反映する
         if (active) {
           setUser(data.user)
         }
       })
       .catch(() => {
+        // 取得に失敗した場合は未ログイン扱いにする
         if (active) {
           setUser(null)
         }
       })
       .finally(() => {
+        // 成否にかかわらずローディング表示を終了する
         if (active) {
           setLoading(false)
         }
@@ -71,34 +77,40 @@ export default function App() {
     [user, loading]
   )
 
+  // ログイン中のみヘッダーを表示する（未ログイン時は何も描画しない）
+  let header = null
+  if (user) {
+    header = (
+      <header className="w-full shrink-0 border-b bg-card">
+        <div className="container mx-auto flex h-14 max-w-6xl items-center justify-between px-4 md:px-8">
+          <div className="flex items-center gap-2.5">
+            <img className="h-7 w-7 rounded-sm border" src="/icon.png" alt="ヨンモク アイコン" />
+            <span className="text-base font-bold tracking-tight text-secondary">ヨンモク</span>
+          </div>
+          <div className="flex items-center gap-4">
+            {/* 名前をそのままアカウント設定への入口にする */}
+            <Link
+              to="/settings"
+              className="hidden font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground md:inline"
+            >
+              {user.nickname || '名無しプレイヤー'}
+            </Link>
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/settings">設定</Link>
+            </Button>
+            <Button variant="outline" size="sm" onClick={authValue.logout}>
+              ログアウト
+            </Button>
+          </div>
+        </div>
+      </header>
+    )
+  }
+
   return (
     <AuthContext.Provider value={authValue}>
       <div className="flex h-dvh flex-col overflow-hidden font-sans">
-        {user ? (
-          <header className="w-full shrink-0 border-b bg-card">
-            <div className="container mx-auto flex h-14 max-w-6xl items-center justify-between px-4 md:px-8">
-              <div className="flex items-center gap-2.5">
-                <img className="h-7 w-7 rounded-sm border" src="/icon.png" alt="ヨンモク アイコン" />
-                <span className="text-base font-bold tracking-tight text-secondary">ヨンモク</span>
-              </div>
-              <div className="flex items-center gap-4">
-                {/* 名前をそのままアカウント設定への入口にする */}
-                <Link
-                  to="/settings"
-                  className="hidden font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground md:inline"
-                >
-                  {user.nickname || '名無しプレイヤー'}
-                </Link>
-                <Button variant="outline" size="sm" asChild>
-                  <Link to="/settings">設定</Link>
-                </Button>
-                <Button variant="outline" size="sm" onClick={authValue.logout}>
-                  ログアウト
-                </Button>
-              </div>
-            </div>
-          </header>
-        ) : null}
+        {header}
         <main className="container mx-auto min-h-0 w-full max-w-6xl flex-1 overflow-auto p-4 md:px-8 md:py-5">
           <Routes>
             <Route path="/login" element={<LoginPage />} />

@@ -33,7 +33,12 @@ const PING_INTERVAL_MS = 30000
 function buildUrl(query) {
   const base = API_BASE_URL || window.location.origin
   const url = new URL('/ws', base)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  // HTTPSで配信されている場合は wss、それ以外は ws で接続する
+  if (url.protocol === 'https:') {
+    url.protocol = 'wss:'
+  } else {
+    url.protocol = 'ws:'
+  }
   url.search = query
   return url.toString()
 }
@@ -69,7 +74,11 @@ function createSocket(query) {
    */
   const dispatch = (event, payload) => {
     const handlers = listeners.get(event)
-    if (!handlers) return
+    // 登録済みハンドラが無いイベントは配信対象が無いので何もしない
+    if (!handlers) {
+      return
+    }
+    // ハンドラ内で登録解除されても走査が壊れないよう複製してから呼び出す
     for (const handler of [...handlers]) {
       try {
         handler(payload)
@@ -83,9 +92,13 @@ function createSocket(query) {
    * 送信待ちのメッセージをすべて送ります。
    */
   const flushQueue = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    // 接続が確立していない間は送信できないので何もしない
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return
+    }
     const items = queue
     queue = []
+    // 溜まっていた送信待ちメッセージを順番に送る
     for (const item of items) {
       ws.send(item)
     }
@@ -95,8 +108,12 @@ function createSocket(query) {
    * 接続を開きます。切断されたら自動で再接続します。
    */
   const connect = () => {
-    if (closed) return
+    // close() 済みの接続は再接続しない
+    if (closed) {
+      return
+    }
 
+    // WebSocket接続を開始する
     ws = new WebSocket(buildUrl(query))
 
     ws.addEventListener('open', () => {
@@ -104,6 +121,7 @@ function createSocket(query) {
       flushQueue()
       // ハイバネーション中のDurable Objectを起こさない自動応答pingを使う
       pingTimer = setInterval(() => {
+        // 接続中のときだけpingを送る
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send('ping')
         }
@@ -112,18 +130,27 @@ function createSocket(query) {
     })
 
     ws.addEventListener('message', (event) => {
-      if (event.data === 'pong') return
+      // pingへの自動応答は処理不要なので読み飛ばす
+      if (event.data === 'pong') {
+        return
+      }
 
       let message
       try {
+        // 受信データをプロトコルのJSONとして解釈する
         message = JSON.parse(event.data)
       } catch {
         return
       }
-      if (!message || typeof message !== 'object') return
+      // JSONオブジェクトとして解釈できない内容は無視する
+      if (!message || typeof message !== 'object') {
+        return
+      }
 
+      // emitのack応答なら、待機中のリクエストへ結果を返す
       if (message.t === 'res') {
         const entry = pending.get(message.id)
+        // 既にタイムアウト済みの場合は待機情報が無いので何もしない
         if (entry) {
           clearTimeout(entry.timer)
           pending.delete(message.id)
@@ -132,6 +159,7 @@ function createSocket(query) {
         return
       }
 
+      // サーバーからのプッシュイベントなら登録済みハンドラへ配信する
       if (message.t === 'ev') {
         dispatch(message.event, message.payload)
       }
@@ -143,7 +171,10 @@ function createSocket(query) {
       ws = null
       dispatch('disconnect', undefined)
 
-      if (closed) return
+      // 明示的に閉じた場合は再接続しない
+      if (closed) {
+        return
+      }
 
       // 再接続（指数バックオフ）
       const delay = RECONNECT_DELAYS[Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1)]
@@ -168,9 +199,12 @@ function createSocket(query) {
      * @param {Function} [ack] - サーバーからの応答を受け取るコールバック
      */
     emit(event, payload, ack) {
-      const id = ack ? nextRequestId++ : null
+      let id = null
 
+      // ackコールバックがある場合のみリクエストIDを採番して応答待ちに登録する
       if (ack) {
+        id = nextRequestId++
+        // 応答が返らないまま待ち続けないようタイムアウトを仕掛ける
         const timer = setTimeout(() => {
           pending.delete(id)
           ack({ ok: false, error: 'timeout' })
@@ -180,6 +214,7 @@ function createSocket(query) {
 
       const message = JSON.stringify({ t: 'req', id, event, payload: payload || {} })
 
+      // 接続中なら即送信し、未接続なら接続後に送るためキューへ積む
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(message)
       } else {
@@ -196,14 +231,18 @@ function createSocket(query) {
      * @param {Function} handler - ハンドラ
      */
     on(event, handler) {
+      // 初めて登録するイベント名ならハンドラ集合を用意する
       if (!listeners.has(event)) {
         listeners.set(event, new Set())
       }
       listeners.get(event).add(handler)
 
+      // 接続済みでconnectを登録した場合は取りこぼしを防ぐため一度だけ呼ぶ
       if (event === 'connect' && ws && ws.readyState === WebSocket.OPEN) {
         queueMicrotask(() => {
-          if (listeners.get('connect')?.has(handler)) {
+          const connectHandlers = listeners.get('connect')
+          // マイクロタスクが走るまでに解除されていないか確認する
+          if (connectHandlers && connectHandlers.has(handler)) {
             handler(undefined)
           }
         })
@@ -216,7 +255,11 @@ function createSocket(query) {
      * @param {Function} handler - 解除するハンドラ
      */
     off(event, handler) {
-      listeners.get(event)?.delete(handler)
+      const handlers = listeners.get(event)
+      // 未登録のイベント名なら解除対象が無いので何もしない
+      if (handlers) {
+        handlers.delete(handler)
+      }
     },
 
     /**
@@ -227,11 +270,13 @@ function createSocket(query) {
       clearInterval(pingTimer)
       pingTimer = null
       queue = []
+      // ack待ちのタイムアウトタイマーをすべて止める
       for (const entry of pending.values()) {
         clearTimeout(entry.timer)
       }
       pending.clear()
       listeners.clear()
+      // 接続が残っていれば閉じる
       if (ws) {
         ws.close()
         ws = null
@@ -258,6 +303,7 @@ let roomSocketId = null
  * @returns {Object} 接続オブジェクト
  */
 export function getLobbySocket() {
+  // アプリ全体で1本を共有するため、未接続のときだけ新規作成する
   if (!lobbySocket) {
     lobbySocket = createSocket('lobby=1')
   }
@@ -272,11 +318,13 @@ export function getLobbySocket() {
  * @returns {Object} 接続オブジェクト
  */
 export function getRoomSocket(roomId) {
+  // 別のルームに繋がっている場合は張り替えるため既存の接続を閉じる
   if (roomSocket && roomSocketId !== roomId) {
     roomSocket.close()
     roomSocket = null
     roomSocketId = null
   }
+  // 接続が無ければ指定ルームへ新規接続する
   if (!roomSocket) {
     roomSocket = createSocket(`roomId=${roomId}`)
     roomSocketId = roomId
@@ -288,6 +336,7 @@ export function getRoomSocket(roomId) {
  * 現在のルーム接続を閉じます（ルーム画面を離れるとき）。
  */
 export function closeRoomSocket() {
+  // ルーム接続が残っていれば閉じる
   if (roomSocket) {
     roomSocket.close()
     roomSocket = null
@@ -300,6 +349,7 @@ export function closeRoomSocket() {
  */
 export function resetSocket() {
   closeRoomSocket()
+  // ロビー接続が残っていれば閉じる
   if (lobbySocket) {
     lobbySocket.close()
     lobbySocket = null

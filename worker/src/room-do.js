@@ -19,7 +19,7 @@ import {
   normalizeState,
   applyAction,
 } from "./game.js";
-import { searchRootBatch, resolveCpuLevel, positionKey } from "./ai.js";
+import { searchBestMove, resolveCpuLevel } from "./ai.js";
 import { encodeEvent, encodeResponse, decodeMessage, PING, PONG } from "./protocol.js";
 
 /** CPUプレイヤーを表す擬似ユーザーID（D1には作らない） */
@@ -33,15 +33,6 @@ const CPU_NICKNAME = "CPU";
 
 /** CPUが着手するまでの遅延（人間らしく見せるため） */
 const CPU_DELAY_MS = 350;
-
-/**
- * 思考を分割して続ける際の、次のアラームまでの間隔。
- *
- * 無料プランは 1リクエストあたり CPU 10ms しか使えないため、深く読むには
- * 探索を複数のアラームに分けるしかない。1回あたりのCPU時間は
- * nodeBudget で頭打ちになり、maxTicks 回まで続きを読む。
- */
-const CPU_TICK_MS = 50;
 
 /** チャット履歴の保持時間（最終発言から30分） */
 const CHAT_TTL_MS = 30 * 60 * 1000;
@@ -66,6 +57,9 @@ export class RoomDurableObject extends DurableObject {
     ctx.blockConcurrencyWhile(async () => {
       const stored = await ctx.storage.get("state");
       this.state = stored || this.createInitialState();
+      // 以前は CPU の思考を複数のアラームに分けており、その途中経過を保存していた。
+      // 今は使わないので、古い状態に残っていれば捨てる
+      delete this.state.cpuSearch;
     });
 
     // ping/pong は Durable Object を起こさずに自動応答させる
@@ -88,7 +82,6 @@ export class RoomDurableObject extends DurableObject {
       chatExpiresAt: null,
       cpu: null,
       cpuMoveAt: null,
-      cpuSearch: null,
     };
   }
 
@@ -123,7 +116,12 @@ export class RoomDurableObject extends DurableObject {
    */
   updateRoomStatus() {
     const { black, white } = this.state.seats;
-    this.state.status = black && white ? "playing" : "waiting";
+    // 両席が埋まっていれば対局できる状態、片方でも空いていれば待機中
+    if (black && white) {
+      this.state.status = "playing";
+    } else {
+      this.state.status = "waiting";
+    }
     return this.state.status;
   }
 
@@ -137,6 +135,7 @@ export class RoomDurableObject extends DurableObject {
   assignSeat(color, userId, userInfo) {
     const seats = this.state.seats;
 
+    // 席の色として想定していない値は受け付けない
     if (color !== "black" && color !== "white") {
       return { ok: false, reason: "invalid_seat" };
     }
@@ -146,8 +145,11 @@ export class RoomDurableObject extends DurableObject {
       return { ok: false, reason: "taken" };
     }
 
-    // 同じユーザーが反対側の席に座っている場合は拒否
-    const otherColor = color === "black" ? "white" : "black";
+    // 同じユーザーが反対側の席に座っている場合は拒否（1人で両席は取れない）
+    let otherColor = "black";
+    if (color === "black") {
+      otherColor = "white";
+    }
     if (seats[otherColor] && seats[otherColor].userId === userId) {
       return { ok: false, reason: "already_seated" };
     }
@@ -170,9 +172,11 @@ export class RoomDurableObject extends DurableObject {
   releaseSeat(color, userId) {
     const seats = this.state.seats;
 
+    // 席の色として想定していない値は受け付けない
     if (color !== "black" && color !== "white") {
       return { ok: false, reason: "invalid_seat" };
     }
+    // 自分が座っている席以外は解放できない
     if (!seats[color] || seats[color].userId !== userId) {
       return { ok: false, reason: "not_owner" };
     }
@@ -192,6 +196,7 @@ export class RoomDurableObject extends DurableObject {
   releaseSeatsByUser(userId) {
     const released = [];
 
+    // 黒・白の両席を確認し、そのユーザーが座っている席をすべて空ける
     for (const color of ["black", "white"]) {
       const seat = this.state.seats[color];
       if (seat && seat.userId === userId) {
@@ -216,19 +221,36 @@ export class RoomDurableObject extends DurableObject {
    */
   applyCpuReady(game) {
     const cpu = this.state.cpu;
+    // CPUが着席していなければ何も変えない
     if (!cpu) {
       return game;
     }
+    // 対局中の準備状態は結果表示に使うため書き換えない
     if (game.status === "playing") {
       return game;
     }
 
-    game.ready = {
-      black: Boolean(game.ready?.black),
-      white: Boolean(game.ready?.white),
-      [cpu.color]: true,
-    };
+    // CPUの席は常に準備完了として扱う
+    const flags = this.readyFlags(game);
+    flags[cpu.color] = true;
+    game.ready = flags;
     return game;
+  }
+
+  /**
+   * ゲーム状態から準備完了フラグを取り出します。
+   * @param {Object} game - ゲーム状態
+   * @returns {{black: boolean, white: boolean}} 準備完了フラグ
+   */
+  readyFlags(game) {
+    // ready を持たない状態でも扱えるよう、両者未準備を既定値にする
+    if (!game || !game.ready) {
+      return { black: false, white: false };
+    }
+    return {
+      black: Boolean(game.ready.black),
+      white: Boolean(game.ready.white),
+    };
   }
 
   /**
@@ -236,7 +258,13 @@ export class RoomDurableObject extends DurableObject {
    * @returns {Object} ゲーム状態
    */
   getRoomGame() {
-    const game = this.state.game ? normalizeState(this.state.game) : createWaitingState();
+    // 保存された対局が無ければ待機状態から始める
+    let game;
+    if (this.state.game) {
+      game = normalizeState(this.state.game);
+    } else {
+      game = createWaitingState();
+    }
     return this.applyCpuReady(game);
   }
 
@@ -257,6 +285,7 @@ export class RoomDurableObject extends DurableObject {
    * @returns {Object|null} 開始したゲーム状態、変化なしならnull
    */
   startGameIfReady() {
+    // 両席が埋まっていない間は開始できない
     if (this.state.status !== "playing") {
       return null;
     }
@@ -268,7 +297,8 @@ export class RoomDurableObject extends DurableObject {
       return game;
     }
 
-    const ready = game.ready || { black: false, white: false };
+    // 両者が準備完了していれば新しい対局を開始する
+    const ready = this.readyFlags(game);
     if (ready.black && ready.white) {
       return this.broadcastGame(createNewGameState());
     }
@@ -283,6 +313,7 @@ export class RoomDurableObject extends DurableObject {
    */
   getPlayerColor(userId) {
     const seats = this.state.seats;
+    // 黒・白のどちらの席にそのユーザーが座っているかを調べる
     if (seats.black && seats.black.userId === userId) {
       return "black";
     }
@@ -298,10 +329,11 @@ export class RoomDurableObject extends DurableObject {
    */
   getCpuSeatColor() {
     const seats = this.state.seats;
-    if (seats.black?.userId === CPU_USER_ID) {
+    // CPUの擬似ユーザーIDが入っている席を探す
+    if (seats.black && seats.black.userId === CPU_USER_ID) {
       return "black";
     }
-    if (seats.white?.userId === CPU_USER_ID) {
+    if (seats.white && seats.white.userId === CPU_USER_ID) {
       return "white";
     }
     return null;
@@ -316,16 +348,17 @@ export class RoomDurableObject extends DurableObject {
   setReady(color, value) {
     const game = this.getRoomGame();
 
+    // 対局中は準備状態を変更できない
     if (game.status === "playing") {
       return { ok: false, error: "game_in_progress" };
     }
 
-    game.ready = {
-      black: Boolean(game.ready?.black),
-      white: Boolean(game.ready?.white),
-      [color]: Boolean(value),
-    };
+    // 指定された席の準備状態だけを書き換える
+    const flags = this.readyFlags(game);
+    flags[color] = Boolean(value);
+    game.ready = flags;
 
+    // 両席が埋まっていて両者とも準備完了なら、この操作で対局を開始する
     if (this.state.status === "playing" && game.ready.black && game.ready.white) {
       const next = this.broadcastGame(createNewGameState());
       return { ok: true, game: next, started: true };
@@ -348,6 +381,7 @@ export class RoomDurableObject extends DurableObject {
     // 残っている「人間の」プレイヤーを勝者とする
     // （離席した本人と、道連れで離席済みのCPUは勝者になれない）
     let winnerColor = null;
+    // 両席を確認し、離席者でもCPUでもないプレイヤーが残っていれば勝者にする
     for (const color of ["black", "white"]) {
       const seat = this.state.seats[color];
       if (seat && seat.userId !== leaverUserId && seat.userId !== CPU_USER_ID) {
@@ -356,7 +390,9 @@ export class RoomDurableObject extends DurableObject {
     }
 
     const game = this.getRoomGame();
+    // 対局中に離脱された場合のみ、対局の後始末をする
     if (game.status === "playing") {
+      // 勝者が決まっていれば不戦勝、決まっていなければ対局を破棄する
       if (winnerColor) {
         game.status = "finished";
         game.winner = winnerColor;
@@ -383,6 +419,7 @@ export class RoomDurableObject extends DurableObject {
    */
   releaseUserSeats(userId) {
     const released = this.releaseSeatsByUser(userId);
+    // 座っていなかった（観戦者だった）場合は何もしない
     if (released.length === 0) {
       return false;
     }
@@ -398,11 +435,13 @@ export class RoomDurableObject extends DurableObject {
     const wasPlaying = released.some((seat) => seat.statusBefore === "playing");
 
     let game = this.getRoomGame();
+    // 対局が始まっていなかった場合は準備状態だけ初期化する
     if (!wasPlaying && game.status !== "playing") {
       game.ready = { black: false, white: false };
       this.state.game = game;
     }
 
+    // 対局中の離脱は不戦敗として処理する
     if (wasPlaying) {
       this.handleForfeit(userId);
     }
@@ -421,88 +460,69 @@ export class RoomDurableObject extends DurableObject {
    */
   scheduleCpuTurn() {
     const cpu = this.state.cpu;
+    // CPUが着席していなければ思考の予定を消す
     if (!cpu) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
     const game = this.getRoomGame();
+    // CPUの手番でなければ思考の予定を消す
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
-    // 局面が変わったので、前の手番の途中結果は使わない
-    this.state.cpuSearch = null;
     this.state.cpuMoveAt = Date.now() + CPU_DELAY_MS;
   }
 
   /**
-   * CPUの手を1手だけ指します。
+   * CPUの手を1手指します。
    *
-   * 1回のアラームで1手だけ処理し、まだCPUの手番なら次のアラームを仕掛ける。
-   * こうすることで1リクエストあたりのCPU時間を短く保てる
-   * （無料プランは10ms/リクエスト）。
+   * 思考はこのアラーム1回の中で最後まで行う。Durable Object には
+   * 無料プランでも 1リクエスト10ms の CPU 制限がかからないため、
+   * 分割する必要は無い（docs/cloudflare-cpu-limit.md）。
+   * 思考中はこのルームのほかのイベントが待たされるので、探索量は
+   * 難易度ごとのノード数で頭打ちにしている。
    */
   runCpuTurn() {
     const cpu = this.state.cpu;
+    // CPUが着席していなければ指す手は無い
     if (!cpu) {
       return;
     }
 
     const game = this.getRoomGame();
+    // CPUの手番でなくなっていたら思考をやめる
     if (game.status !== "playing" || game.turn !== cpu.color) {
       this.state.cpuMoveAt = null;
-      this.state.cpuSearch = null;
       return;
     }
 
-    // 局面の指紋。途中結果が別の局面のものなら捨てる。
-    const signature = positionKey(game);
-    let search = this.state.cpuSearch;
-    if (!search || search.signature !== signature) {
-      search = { signature, index: 0, ticks: 0, bestScore: null, bestAction: null };
-    }
+    // 探索設定は着席時に保存した値ではなく、難易度名から毎回求め直す。
+    // 設定を変えてデプロイしたとき、既に着席しているCPUにもすぐ反映させるため。
+    const config = resolveCpuLevel(cpu.level, this.env);
 
-    const batch = searchRootBatch(game, cpu.color, {
-      depth: cpu.depth,
-      startIndex: search.index,
-      nodeBudget: cpu.nodeBudget,
-      // -Infinity は保存に向かないので null で持ち回す
-      bestScore: search.bestScore === null ? -Infinity : search.bestScore,
-      bestAction: search.bestAction,
+    // 最善手を探索する
+    const action = searchBestMove(game, cpu.color, {
+      maxDepth: config.depth,
+      nodeBudget: config.nodeBudget,
     });
-
-    search.index = batch.nextIndex;
-    search.ticks += 1;
-    search.bestScore = Number.isFinite(batch.bestScore) ? batch.bestScore : null;
-    search.bestAction = batch.bestAction;
-
-    // まだ読み残しがあり、回数の上限にも達していないなら続きを次のアラームで読む。
-    // 1回あたりのCPU時間は nodeBudget で頭打ちになっている。
-    const finished = batch.done || search.ticks >= cpu.maxTicks;
-    if (!finished && batch.bestAction) {
-      this.state.cpuSearch = search;
-      this.state.cpuMoveAt = Date.now() + CPU_TICK_MS;
-      return;
-    }
-
-    this.state.cpuSearch = null;
-
-    const action = batch.bestAction;
+    // 指す手が見つからなかった場合は何もしない
     if (!action) {
       this.state.cpuMoveAt = null;
       return;
     }
 
+    // 探索で選ばれた手を実際の対局へ反映する
     const result = applyAction(game, action);
+    // ルール上成立しない手だった場合は着手しない
     if (!result.ok) {
       this.state.cpuMoveAt = null;
       return;
     }
 
+    // 終局したら次の対局に備えて準備状態を戻す
     if (result.state.status === "finished") {
       result.state.ready = { black: false, white: false };
     }
@@ -548,6 +568,7 @@ export class RoomDurableObject extends DurableObject {
    */
   cleanupExpiredChat() {
     const expiresAt = this.state.chatExpiresAt;
+    // 期限が未設定、またはまだ来ていなければ削除しない
     if (!expiresAt || expiresAt > Date.now()) {
       return false;
     }
@@ -569,6 +590,7 @@ export class RoomDurableObject extends DurableObject {
    */
   broadcast(event, payload) {
     const message = encodeEvent(event, payload);
+    // このルームに繋がっている全ソケットへ同じメッセージを送る
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.send(message);
@@ -590,10 +612,12 @@ export class RoomDurableObject extends DurableObject {
    */
   presence(exclude = null) {
     const sockets = this.ctx.getWebSockets();
+    // 除外指定が無ければ接続数をそのまま返せる
     if (!exclude) {
       return sockets.length;
     }
     let count = 0;
+    // 除外対象のソケットだけを数えずに集計する
     for (const ws of sockets) {
       if (ws !== exclude) {
         count += 1;
@@ -609,6 +633,7 @@ export class RoomDurableObject extends DurableObject {
    * @returns {boolean} 他に接続があればtrue
    */
   hasOtherSocket(userId, exclude) {
+    // 判定対象以外の接続を走査し、同じユーザーのものがあるか調べる
     for (const ws of this.ctx.getWebSockets()) {
       if (ws === exclude) {
         continue;
@@ -630,12 +655,14 @@ export class RoomDurableObject extends DurableObject {
       (value) => typeof value === "number" && value > 0
     );
 
+    // 予定が1つも無ければアラームは不要
     if (candidates.length === 0) {
       return;
     }
 
     const next = Math.min(...candidates);
     const current = await this.ctx.storage.getAlarm();
+    // 既存の予定より早い場合だけ仕掛け直す
     if (current === null || current > next) {
       await this.ctx.storage.setAlarm(next);
     }
@@ -648,6 +675,7 @@ export class RoomDurableObject extends DurableObject {
   async alarm() {
     const now = Date.now();
 
+    // CPUの着手予定時刻を過ぎていれば1手ぶん思考を進める
     if (this.state.cpuMoveAt && this.state.cpuMoveAt <= now) {
       this.state.cpuMoveAt = null;
       this.runCpuTurn();
@@ -665,6 +693,7 @@ export class RoomDurableObject extends DurableObject {
    * @returns {Promise<void>}
    */
   async notifyLobby(exclude = null) {
+    // ルームIDが未確定の間は通知する内容が無い
     if (this.state.roomId === null) {
       return;
     }
@@ -703,6 +732,7 @@ export class RoomDurableObject extends DurableObject {
 
     // ルームIDと名前は初回アクセス時に確定させる
     const roomId = Number(url.searchParams.get("roomId"));
+    // 未設定、または別のIDで来た初回だけルーム情報を確定させる
     if (Number.isFinite(roomId) && roomId > 0 && this.state.roomId !== roomId) {
       this.state.roomId = roomId;
       this.state.name = `ルーム ${roomId}`;
@@ -720,6 +750,7 @@ export class RoomDurableObject extends DurableObject {
     }
 
     // --- WebSocket 接続 ---
+    // Upgrade ヘッダが無いリクエストはWebSocketとして扱えない
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
@@ -753,16 +784,19 @@ export class RoomDurableObject extends DurableObject {
    */
   async webSocketMessage(ws, raw) {
     const message = decodeMessage(raw);
+    // ack要求以外のメッセージはこのルームでは扱わない
     if (!message || message.t !== "req") {
       return;
     }
 
     const user = ws.deserializeAttachment();
+    // 接続時に紐づけたユーザー情報が無い接続は処理できない
     if (!user) {
       return;
     }
 
     const respond = (payload) => {
+      // ack不要（IDなし）の要求には応答を返さない
       if (message.id !== undefined && message.id !== null) {
         try {
           ws.send(encodeResponse(message.id, payload));
@@ -773,6 +807,7 @@ export class RoomDurableObject extends DurableObject {
     };
 
     try {
+      // イベントごとの処理を実行する
       await this.handleEvent(ws, user, message.event, message.payload || {}, respond);
     } catch (error) {
       console.error("room event error:", message.event, error);
@@ -799,6 +834,7 @@ export class RoomDurableObject extends DurableObject {
     const userId = user.userId;
     const userInfo = { loginId: user.loginId, nickname: user.nickname };
 
+    // イベント名ごとに処理を振り分ける
     switch (event) {
       // ---------------------------------------------------------------------
       case "room:join": {
@@ -825,25 +861,25 @@ export class RoomDurableObject extends DurableObject {
       // ---------------------------------------------------------------------
       case "seat:take": {
         const color = payload.color;
+        // 席の色として想定していない値は受け付けない
         if (color !== "black" && color !== "white") {
           respond({ ok: false, error: "invalid_request" });
           return;
         }
 
         const result = this.assignSeat(color, userId, userInfo);
+        // 着席できなかった場合は理由をそのまま返す
         if (!result.ok) {
           respond({ ok: false, error: result.reason });
           return;
         }
 
-        // 着席時はその席の準備状態をリセット
+        // 着席時はその席の準備状態をリセット（対局中は書き換えない）
         const game = this.getRoomGame();
         if (game.status !== "playing") {
-          game.ready = {
-            black: Boolean(game.ready?.black),
-            white: Boolean(game.ready?.white),
-            [color]: false,
-          };
+          const flags = this.readyFlags(game);
+          flags[color] = false;
+          game.ready = flags;
           this.state.game = game;
         }
 
@@ -856,12 +892,14 @@ export class RoomDurableObject extends DurableObject {
       // ---------------------------------------------------------------------
       case "seat:leave": {
         const color = payload.color;
+        // 席の色として想定していない値は受け付けない
         if (color !== "black" && color !== "white") {
           respond({ ok: false, error: "invalid_request" });
           return;
         }
 
         const result = this.releaseSeat(color, userId);
+        // 離席できなかった場合は理由をそのまま返す
         if (!result.ok) {
           respond({ ok: false, error: result.reason });
           return;
@@ -876,11 +914,13 @@ export class RoomDurableObject extends DurableObject {
         }
 
         let game = this.getRoomGame();
+        // 対局が始まっていなかった場合は準備状態だけ初期化する
         if (result.statusBefore !== "playing" && game.status !== "playing") {
           game.ready = { black: false, white: false };
           this.state.game = game;
         }
 
+        // 対局中の離席は不戦敗として処理する
         if (result.statusBefore === "playing") {
           this.handleForfeit(userId);
         }
@@ -894,6 +934,7 @@ export class RoomDurableObject extends DurableObject {
       // ---------------------------------------------------------------------
       case "cpu:configure": {
         const game = this.getRoomGame();
+        // 対局中はCPUの設定を変更できない
         if (game.status === "playing") {
           respond({ ok: false, error: "game_in_progress" });
           return;
@@ -902,6 +943,7 @@ export class RoomDurableObject extends DurableObject {
         // --- CPU解除 ---
         if (!payload.enabled) {
           const cpuColor = this.getCpuSeatColor();
+          // CPUが座っていればその席を空ける
           if (cpuColor) {
             this.releaseSeat(cpuColor, CPU_USER_ID);
           }
@@ -909,12 +951,11 @@ export class RoomDurableObject extends DurableObject {
           this.state.cpuMoveAt = null;
 
           const next = this.getRoomGame();
+          // CPUが座っていた席の準備完了も解除する
           if (cpuColor) {
-            next.ready = {
-              black: Boolean(next.ready?.black),
-              white: Boolean(next.ready?.white),
-              [cpuColor]: false,
-            };
+            const flags = this.readyFlags(next);
+            flags[cpuColor] = false;
+            next.ready = flags;
           }
 
           const broadcasted = this.broadcastGame(next);
@@ -925,12 +966,14 @@ export class RoomDurableObject extends DurableObject {
 
         // --- CPU有効化 ---
         const color = payload.color;
+        // 席の色として想定していない値は受け付けない
         if (color !== "black" && color !== "white") {
           respond({ ok: false, error: "invalid_color" });
           return;
         }
 
         const targetSeat = this.state.seats[color];
+        // 人が座っている席にはCPUを座らせられない
         if (targetSeat && targetSeat.userId !== CPU_USER_ID) {
           respond({ ok: false, error: "seat_taken" });
           return;
@@ -942,25 +985,28 @@ export class RoomDurableObject extends DurableObject {
           this.releaseSeat(existing, CPU_USER_ID);
         }
 
+        // CPUを擬似ユーザーとして着席させる
         const assigned = this.assignSeat(color, CPU_USER_ID, {
           loginId: CPU_LOGIN_ID,
           nickname: CPU_NICKNAME,
         });
+        // 着席できなかった場合は席が埋まっているものとして返す
         if (!assigned.ok) {
           respond({ ok: false, error: "seat_taken" });
           return;
         }
 
+        // 難易度名だけを保持する（未知の名前はここで既定の難易度に置き換える）。
+        // 探索の深さやノード数は、思考のたびに難易度名から求め直す
         const resolved = resolveCpuLevel(payload.level, this.env);
-        this.state.cpu = { color, ...resolved };
+        this.state.cpu = { color, level: resolved.level };
 
         const next = this.getRoomGame();
+        // 対局前ならCPUの席を準備完了にしておく
         if (next.status !== "playing") {
-          next.ready = {
-            black: Boolean(next.ready?.black),
-            white: Boolean(next.ready?.white),
-            [color]: true,
-          };
+          const flags = this.readyFlags(next);
+          flags[color] = true;
+          next.ready = flags;
         }
 
         const broadcasted = this.broadcastGame(next);
@@ -978,17 +1024,20 @@ export class RoomDurableObject extends DurableObject {
       // ---------------------------------------------------------------------
       case "game:ready": {
         const color = this.getPlayerColor(userId);
+        // 着席していない観戦者は準備状態を変更できない
         if (!color) {
           respond({ ok: false, error: "not_seated" });
           return;
         }
 
         const result = this.setReady(color, Boolean(payload.ready));
+        // 変更できなかった場合は理由をそのまま返す
         if (!result.ok) {
           respond({ ok: false, error: result.error });
           return;
         }
 
+        // この操作で対局が始まった場合は、CPUの手番なら思考を仕掛ける
         if (result.started) {
           this.scheduleCpuTurn();
         }
@@ -1001,17 +1050,24 @@ export class RoomDurableObject extends DurableObject {
       case "game:place":
       case "game:move": {
         const color = this.getPlayerColor(userId);
+        // 着席していない観戦者は着手できない
         if (!color) {
           respond({ ok: false, error: "not_seated" });
           return;
         }
 
-        const type = event === "game:place" ? "place" : "move";
+        // イベント名から「打つ」か「動かす」かを決める
+        let type = "move";
+        if (event === "game:place") {
+          type = "place";
+        }
         const action = { type, color };
 
+        // 種類ごとに必要な座標を検証してアクションを組み立てる
         if (type === "place") {
           const row = Number(payload.row);
           const col = Number(payload.col);
+          // 座標が整数で送られてきていなければ受け付けない
           if (!Number.isInteger(row) || !Number.isInteger(col)) {
             respond({ ok: false, error: "invalid_target" });
             return;
@@ -1020,6 +1076,7 @@ export class RoomDurableObject extends DurableObject {
         } else {
           const from = payload.from;
           const to = payload.to;
+          // 移動元・移動先の座標がそろっていなければ受け付けない
           if (
             !from ||
             !to ||
@@ -1035,12 +1092,15 @@ export class RoomDurableObject extends DurableObject {
           action.to = { row: to.row, col: to.col };
         }
 
+        // 組み立てたアクションを現在の対局へ適用する
         const result = applyAction(this.getRoomGame(), action);
+        // ルール違反の着手は理由を添えて拒否する
         if (!result.ok) {
           respond({ ok: false, error: result.error });
           return;
         }
 
+        // 終局したら次の対局に備えて準備状態を戻す
         if (result.state.status === "finished") {
           result.state.ready = { black: false, white: false };
         }
@@ -1054,21 +1114,25 @@ export class RoomDurableObject extends DurableObject {
       // ---------------------------------------------------------------------
       case "chat:send": {
         const raw = payload.message;
+        // 文字列以外の本文は受け付けない
         if (typeof raw !== "string") {
           respond({ ok: false, error: "invalid_request" });
           return;
         }
 
         const trimmed = raw.trim();
+        // 空白だけの発言は送信させない
         if (!trimmed) {
           respond({ ok: false, error: "empty" });
           return;
         }
+        // 長すぎる発言は拒否する
         if (trimmed.length > CHAT_MAX_LENGTH) {
           respond({ ok: false, error: "too_long" });
           return;
         }
 
+        // 履歴に追加し、ルーム内の全員へ配信する
         const entry = this.addChatMessage(userId, trimmed, userInfo);
         this.broadcast("chat:new", entry);
         respond({ ok: true });
